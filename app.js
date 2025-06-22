@@ -51,7 +51,9 @@ async function loadDepartures(stationId) {
     const res = await fetch(`https://api.tfl.gov.uk/StopPoint/${stationId}/Arrivals`);
     const data = await res.json();
 
-    const sorted = data.sort((a, b) => a.timeToStation - b.timeToStation);
+    const sorted = data
+      .filter(dep => dep.destinationName) // Filter out undefined or null destinations
+      .sort((a, b) => a.timeToStation - b.timeToStation);
 
     if (sorted.length === 0) {
       departuresDiv.innerHTML = "<p>No upcoming departures found.</p>";
