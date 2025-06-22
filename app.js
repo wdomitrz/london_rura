@@ -3,20 +3,17 @@ const departuresDiv = document.getElementById("departures");
 
 let refreshIntervalId = null;
 
-// Get a URL query parameter by name
 function getQueryParam(param) {
   const urlParams = new URLSearchParams(window.location.search);
   return urlParams.get(param);
 }
 
-// Update a query parameter in the URL
 function updateQueryParam(param, value) {
   const url = new URL(window.location);
   url.searchParams.set(param, value);
   window.history.replaceState({}, "", url);
 }
 
-// Fetch stations from TfL API
 async function fetchStations() {
   const res = await fetch("https://api.tfl.gov.uk/StopPoint/Mode/tube");
   const data = await res.json();
@@ -31,7 +28,6 @@ async function fetchStations() {
     stationSelect.appendChild(opt);
   });
 
-  // If a station is specified in the URL, select it
   const stationFromURL = getQueryParam("station");
   if (stationFromURL) {
     stationSelect.value = stationFromURL;
@@ -52,7 +48,7 @@ async function loadDepartures(stationId) {
     const data = await res.json();
 
     const sorted = data
-      .filter(dep => dep.destinationName) // Filter out undefined or null destinations
+      .filter(dep => dep.destinationName)
       .sort((a, b) => a.timeToStation - b.timeToStation);
 
     if (sorted.length === 0) {
@@ -99,25 +95,16 @@ stationSelect.addEventListener("change", () => {
     return;
   }
 
-  // Update URL with selected station
   updateQueryParam("station", stationId);
-
-  // Load departures initially
   loadDepartures(stationId);
-
-  // Clear any existing interval
   if (refreshIntervalId) clearInterval(refreshIntervalId);
-
-  // Set interval to refresh departures every 30 seconds
   refreshIntervalId = setInterval(() => {
     loadDepartures(stationId);
   }, 30000);
 });
 
-// Load stations on page load
 fetchStations();
 
-// Register Service Worker
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("service-worker.js");
 }
