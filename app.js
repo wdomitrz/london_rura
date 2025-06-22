@@ -20,6 +20,7 @@ const lineColors = {
   "Central": "#E32017",
   "Circle": "#FFD300",
   "District": "#00782A",
+  "Elizabeth": "#6950a1",
   "Hammersmith & City": "#F3A9BB",
   "Jubilee": "#6A7278",
   "Metropolitan": "#9B0056",
@@ -30,10 +31,10 @@ const lineColors = {
 };
 
 async function fetchStations() {
-  const res = await fetch("https://api.tfl.gov.uk/StopPoint/Mode/tube");
+  const res = await fetch("https://api.tfl.gov.uk/StopPoint/Mode/tube,elizabeth-line");
   const data = await res.json();
   const stations = data.stopPoints
-    .filter(sp => sp.commonName && sp.id.startsWith("940GZZLU"))
+    .filter(sp => sp.commonName && /(940GZZLU|940GZZCR)/.test(sp.id))
     .sort((a, b) => a.commonName.localeCompare(b.commonName));
 
   stations.forEach(station => {
