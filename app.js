@@ -1,6 +1,19 @@
 const stationSelect = document.getElementById("stationSelect");
 const departuresDiv = document.getElementById("departures");
 
+// Get a URL query parameter by name
+function getQueryParam(param) {
+  const urlParams = new URLSearchParams(window.location.search);
+  return urlParams.get(param);
+}
+
+// Update a query parameter in the URL
+function updateQueryParam(param, value) {
+  const url = new URL(window.location);
+  url.searchParams.set(param, value);
+  window.history.replaceState({}, "", url);
+}
+
 // Fetch stations from TfL API
 async function fetchStations() {
   const res = await fetch("https://api.tfl.gov.uk/StopPoint/Mode/tube");
@@ -15,11 +28,21 @@ async function fetchStations() {
     opt.textContent = station.commonName;
     stationSelect.appendChild(opt);
   });
+
+  // If a station is specified in the URL, select it
+  const stationFromURL = getQueryParam("station");
+  if (stationFromURL) {
+    stationSelect.value = stationFromURL;
+    stationSelect.dispatchEvent(new Event("change"));
+  }
 }
 
 stationSelect.addEventListener("change", async () => {
   const stationId = stationSelect.value;
   if (!stationId) return;
+
+  // Update URL with selected station
+  updateQueryParam("station", stationId);
 
   departuresDiv.innerHTML = "<p>Loading departures...</p>";
 
@@ -34,28 +57,27 @@ stationSelect.addEventListener("change", async () => {
       return;
     }
 
-
-departuresDiv.innerHTML = `
-  <h2>Departures</h2>
-  <table>
-    <thead>
-      <tr>
-        <th>Line</th>
-        <th>Destination</th>
-        <th>Arrival (min)</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${sorted.slice(0, 10).map(dep => `
-        <tr>
-          <td>${dep.lineName}</td>
-          <td>${dep.destinationName}</td>
-          <td>${Math.round(dep.timeToStation / 60)}</td>
-        </tr>
-      `).join("")}
-    </tbody>
-  </table>
-`;
+    departuresDiv.innerHTML = `
+      <h2>Departures</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Line</th>
+            <th>Destination</th>
+            <th>Arrival (min)</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${sorted.slice(0, 10).map(dep => `
+            <tr>
+              <td>${dep.lineName}</td>
+              <td>${dep.destinationName}</td>
+              <td>${Math.round(dep.timeToStation / 60)}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `;
   } catch (error) {
     departuresDiv.innerHTML = "<p>Error fetching departures. Please try again later.</p>";
     console.error(error);
