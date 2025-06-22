@@ -14,6 +14,21 @@ function updateQueryParam(param, value) {
   window.history.replaceState({}, "", url);
 }
 
+// Hardcoded line colors with correct line names including 'Hammersmith & City'
+const lineColors = {
+  "Bakerloo": "#B36305",
+  "Central": "#E32017",
+  "Circle": "#FFD300",
+  "District": "#00782A",
+  "Hammersmith & City": "#F3A9BB",
+  "Jubilee": "#6A7278",
+  "Metropolitan": "#9B0056",
+  "Northern": "#000000",
+  "Piccadilly": "#003688",
+  "Victoria": "#00A0E2",
+  "Waterloo & City": "#95CDBA",
+};
+
 async function fetchStations() {
   const res = await fetch("https://api.tfl.gov.uk/StopPoint/Mode/tube");
   const data = await res.json();
@@ -84,13 +99,16 @@ async function loadDepartures(stationId) {
             </tr>
           </thead>
           <tbody>
-            ${groupedByPlatform[platform].slice(0, 10).map(dep => `
-              <tr>
-                <td>${dep.lineName}</td>
-                <td>${dep.destinationName}</td>
-                <td>${Math.round(dep.timeToStation / 60)}</td>
-              </tr>
-            `).join("")}
+            ${groupedByPlatform[platform].slice(0, 10).map(dep => {
+        const color = lineColors[dep.lineName] || "#666";
+        return `
+                <tr>
+                  <td style="color: ${color}; font-weight: bold;">${dep.lineName}</td>
+                  <td>${dep.destinationName}</td>
+                  <td>${Math.round(dep.timeToStation / 60)}</td>
+                </tr>
+              `;
+      }).join("")}
           </tbody>
         </table>
       `;
