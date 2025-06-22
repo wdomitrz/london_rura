@@ -47,36 +47,57 @@ async function loadDepartures(stationId) {
     const res = await fetch(`https://api.tfl.gov.uk/StopPoint/${stationId}/Arrivals`);
     const data = await res.json();
 
-    const sorted = data
+    const filtered = data
       .filter(dep => dep.destinationName)
       .sort((a, b) => a.timeToStation - b.timeToStation);
 
-    if (sorted.length === 0) {
+    if (filtered.length === 0) {
       departuresDiv.innerHTML = "<p>No upcoming departures found.</p>";
       return;
     }
 
-    departuresDiv.innerHTML = `
-      <h2>Departures</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Line</th>
-            <th>Destination</th>
-            <th>Arrival (min)</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${sorted.slice(0, 10).map(dep => `
+    const groupedByPlatform = {};
+    for (const dep of filtered) {
+      const platform = dep.platformName || "Unknown Platform";
+      if (!groupedByPlatform[platform]) {
+        groupedByPlatform[platform] = [];
+      }
+      groupedByPlatform[platform].push(dep);
+    }
+
+    const sortedPlatforms = Object.keys(groupedByPlatform).sort((a, b) => {
+      const numA = parseInt(a.match(/\d+/)) || 0;
+      const numB = parseInt(b.match(/\d+/)) || 0;
+      return numA - numB;
+    });
+
+    let html = "<h2>Departures by Platform</h2>";
+    for (const platform of sortedPlatforms) {
+      html += `
+        <h3>${platform}</h3>
+        <table>
+          <thead>
             <tr>
-              <td>${dep.lineName}</td>
-              <td>${dep.destinationName}</td>
-              <td>${Math.round(dep.timeToStation / 60)}</td>
+              <th>Line</th>
+              <th>Destination</th>
+              <th>Arrival (min)</th>
             </tr>
-          `).join("")}
-        </tbody>
-      </table>
-    `;
+          </thead>
+          <tbody>
+            ${groupedByPlatform[platform].slice(0, 10).map(dep => `
+              <tr>
+                <td>${dep.lineName}</td>
+                <td>${dep.destinationName}</td>
+                <td>${Math.round(dep.timeToStation / 60)}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      `;
+    }
+
+    departuresDiv.innerHTML = html;
+
   } catch (error) {
     departuresDiv.innerHTML = "<p>Error fetching departures. Please try again later.</p>";
     console.error(error);
