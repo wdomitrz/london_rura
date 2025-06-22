@@ -15,16 +15,30 @@ function updateQueryParam(param, value) {
 }
 
 async function fetchStations() {
-  const res = await fetch("https://api.tfl.gov.uk/StopPoint/Mode/tube");
+  const res = await fetch("https://api.tfl.gov.uk/StopPoint/Mode/tube,elizabeth-line");
   const data = await res.json();
-  const stations = data.stopPoints
-    .filter(sp => sp.commonName && sp.id.startsWith("940GZZLU"))
+
+  const filtered = data.stopPoints.filter(sp =>
+    sp.commonName &&
+    (sp.stopType === "NaptanMetroStation" || sp.stopType === "NaptanRailStation")
+  );
+
+  const uniqueStationsMap = new Map();
+  for (const station of filtered) {
+    if (!uniqueStationsMap.has(station.commonName)) {
+      uniqueStationsMap.set(station.commonName, station);
+    }
+  }
+
+  const stations = Array.from(uniqueStationsMap.values())
     .sort((a, b) => a.commonName.localeCompare(b.commonName));
+
+  stationSelect.innerHTML = "";
 
   stations.forEach(station => {
     const opt = document.createElement("option");
     opt.value = station.id;
-    opt.textContent = station.commonName;
+    opt.textContent = `${station.commonName} (${station.modes.join(", ")})`;
     stationSelect.appendChild(opt);
   });
 
