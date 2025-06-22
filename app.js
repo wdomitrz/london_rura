@@ -14,6 +14,14 @@ function updateQueryParam(param, value) {
   window.history.replaceState({}, "", url);
 }
 
+function updatePageTitle(stationName) {
+  if (stationName) {
+    document.title = `London Rura - ${stationName}`;
+  } else {
+    document.title = "London Rura";
+  }
+}
+
 // Hardcoded line colors with correct line names including 'Hammersmith & City'
 const lineColors = {
   "Bakerloo": "#B36305",
@@ -125,6 +133,8 @@ async function loadDepartures(stationId) {
 
 stationSelect.addEventListener("change", () => {
   const stationId = stationSelect.value;
+  const stationName = stationSelect.options[stationSelect.selectedIndex].text;
+
   if (!stationId) {
     departuresDiv.innerHTML = "<p>Please select a station.</p>";
     if (refreshIntervalId) {
@@ -132,11 +142,14 @@ stationSelect.addEventListener("change", () => {
       refreshIntervalId = null;
     }
     updateQueryParam("station", "");
+    updatePageTitle(null);
     return;
   }
 
   updateQueryParam("station", stationId);
   loadDepartures(stationId);
+  updatePageTitle(stationName);
+
   if (refreshIntervalId) clearInterval(refreshIntervalId);
   refreshIntervalId = setInterval(() => {
     loadDepartures(stationId);
