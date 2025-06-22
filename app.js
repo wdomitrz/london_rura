@@ -1,6 +1,8 @@
 const stationSelect = document.getElementById("stationSelect");
 const departuresDiv = document.getElementById("departures");
 
+let refreshIntervalId = null;
+
 // Get a URL query parameter by name
 function getQueryParam(param) {
   const urlParams = new URLSearchParams(window.location.search);
@@ -37,12 +39,11 @@ async function fetchStations() {
   }
 }
 
-stationSelect.addEventListener("change", async () => {
-  const stationId = stationSelect.value;
-  if (!stationId) return;
-
-  // Update URL with selected station
-  updateQueryParam("station", stationId);
+async function loadDepartures(stationId) {
+  if (!stationId) {
+    departuresDiv.innerHTML = "<p>Please select a station.</p>";
+    return;
+  }
 
   departuresDiv.innerHTML = "<p>Loading departures...</p>";
 
@@ -82,6 +83,33 @@ stationSelect.addEventListener("change", async () => {
     departuresDiv.innerHTML = "<p>Error fetching departures. Please try again later.</p>";
     console.error(error);
   }
+}
+
+stationSelect.addEventListener("change", () => {
+  const stationId = stationSelect.value;
+  if (!stationId) {
+    departuresDiv.innerHTML = "<p>Please select a station.</p>";
+    if (refreshIntervalId) {
+      clearInterval(refreshIntervalId);
+      refreshIntervalId = null;
+    }
+    updateQueryParam("station", "");
+    return;
+  }
+
+  // Update URL with selected station
+  updateQueryParam("station", stationId);
+
+  // Load departures initially
+  loadDepartures(stationId);
+
+  // Clear any existing interval
+  if (refreshIntervalId) clearInterval(refreshIntervalId);
+
+  // Set interval to refresh departures every 30 seconds
+  refreshIntervalId = setInterval(() => {
+    loadDepartures(stationId);
+  }, 30000);
 });
 
 // Load stations on page load
