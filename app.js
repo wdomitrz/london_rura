@@ -25,8 +25,9 @@ async function fetchStations() {
     // "river-bus",
     // "coach",
     // "national-rail"
-  ].join(",");
-  const res = await fetch(`https://api.tfl.gov.uk/StopPoint/Mode/${modes}`);
+  ];
+  const modesParam = modes.join(",");
+  const res = await fetch(`https://api.tfl.gov.uk/StopPoint/Mode/${modesParam}`);
   const data = await res.json();
 
   const filtered = data.stopPoints.filter(sp =>
@@ -37,7 +38,8 @@ async function fetchStations() {
       "NaptanBusCoachStopCluster",
       "NaptanOnstreetBusCoachStopPair",
       "TransportInterchange"
-    ].includes(sp.stopType)
+    ].includes(sp.stopType) &&
+    sp.modes.some(mode => modes.includes(mode)) // <-- filter by requested modes
   );
 
   const uniqueStationsMap = new Map();
@@ -55,7 +57,8 @@ async function fetchStations() {
   stations.forEach(station => {
     const opt = document.createElement("option");
     opt.value = station.id;
-    opt.textContent = `${station.commonName} (${station.modes.join(", ")})`;
+    const filteredModes = station.modes.filter(m => modes.includes(m));
+    opt.textContent = `${station.commonName}${filteredModes.length ? ` (${filteredModes.join(", ")})` : ""}`;
     stationSelect.appendChild(opt);
   });
 
@@ -65,6 +68,7 @@ async function fetchStations() {
     stationSelect.dispatchEvent(new Event("change"));
   }
 }
+
 
 async function loadDepartures(stationId) {
   if (!stationId) {
