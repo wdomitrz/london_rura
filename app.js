@@ -22,7 +22,6 @@ function updatePageTitle(stationName) {
   }
 }
 
-// Hardcoded line colors with correct line names including 'Hammersmith & City'
 const lineColors = {
   "Bakerloo": "#B36305",
   "Central": "#E32017",
