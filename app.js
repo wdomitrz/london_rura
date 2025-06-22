@@ -15,50 +15,16 @@ function updateQueryParam(param, value) {
 }
 
 async function fetchStations() {
-  const modes = [
-    "overground",
-    "tube",
-    "elizabeth-line",
-    "dlr",
-    // "bus",
-    // "tram",
-    // "river-bus",
-    // "coach",
-    // "national-rail"
-  ];
-  const modesParam = modes.join(",");
-  const res = await fetch(`https://api.tfl.gov.uk/StopPoint/Mode/${modesParam}`);
+  const res = await fetch("https://api.tfl.gov.uk/StopPoint/Mode/tube");
   const data = await res.json();
-
-  const filtered = data.stopPoints.filter(sp =>
-    sp.commonName &&
-    [
-      "NaptanMetroStation",
-      "NaptanRailStation",
-      "NaptanBusCoachStopCluster",
-      "NaptanOnstreetBusCoachStopPair",
-      "TransportInterchange"
-    ].includes(sp.stopType) &&
-    sp.modes.some(mode => modes.includes(mode)) // <-- filter by requested modes
-  );
-
-  const uniqueStationsMap = new Map();
-  for (const station of filtered) {
-    if (!uniqueStationsMap.has(station.commonName)) {
-      uniqueStationsMap.set(station.commonName, station);
-    }
-  }
-
-  const stations = Array.from(uniqueStationsMap.values())
+  const stations = data.stopPoints
+    .filter(sp => sp.commonName && sp.id.startsWith("940GZZLU"))
     .sort((a, b) => a.commonName.localeCompare(b.commonName));
-
-  stationSelect.innerHTML = "";
 
   stations.forEach(station => {
     const opt = document.createElement("option");
     opt.value = station.id;
-    const filteredModes = station.modes.filter(m => modes.includes(m));
-    opt.textContent = `${station.commonName}${filteredModes.length ? ` (${filteredModes.join(", ")})` : ""}`;
+    opt.textContent = station.commonName;
     stationSelect.appendChild(opt);
   });
 
@@ -68,7 +34,6 @@ async function fetchStations() {
     stationSelect.dispatchEvent(new Event("change"));
   }
 }
-
 
 async function loadDepartures(stationId) {
   if (!stationId) {
