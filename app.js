@@ -34,14 +34,28 @@ stationSelect.addEventListener("change", async () => {
       return;
     }
 
-    departuresDiv.innerHTML = `
-      <h2>Departures</h2>
-      <ul>
-        ${sorted.slice(0, 10).map(dep => `
-          <li><strong>${dep.lineName}</strong> to ${dep.destinationName} in ${Math.round(dep.timeToStation / 60)} min</li>
-        `).join("")}
-      </ul>
-    `;
+
+departuresDiv.innerHTML = `
+  <h2>Departures</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Line</th>
+        <th>Destination</th>
+        <th>Arrival (min)</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${sorted.slice(0, 10).map(dep => `
+        <tr>
+          <td>${dep.lineName}</td>
+          <td>${dep.destinationName}</td>
+          <td>${Math.round(dep.timeToStation / 60)}</td>
+        </tr>
+      `).join("")}
+    </tbody>
+  </table>
+`;
   } catch (error) {
     departuresDiv.innerHTML = "<p>Error fetching departures. Please try again later.</p>";
     console.error(error);
