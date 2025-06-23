@@ -113,7 +113,7 @@ async function loadDepartures(stationId) {
                 <tr>
                   <td style="color: ${color}; font-weight: bold;">${dep.lineName}</td>
                   <td>${dep.destinationName}</td>
-                  <td>${Math.round(dep.timeToStation / 60)}</td>
+                  <td>${Math.floor(dep.timeToStation / 60)}</td>
                 </tr>
               `;
       }).join("")}
