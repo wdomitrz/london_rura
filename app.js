@@ -71,7 +71,6 @@ async function loadDepartures(stationId) {
     const data = await res.json();
 
     const filtered = data
-      .filter(dep => dep.destinationName)
       .sort((a, b) => a.timeToStation - b.timeToStation);
 
     if (filtered.length === 0) {
