@@ -7,8 +7,8 @@
     "theme_color": "#000000",
     "icons": [
         {
-            "src": "https://upload.wikimedia.org/wikipedia/commons/thumb/4/41/Underground.svg/512px-Underground.svg.png",
-            "sizes": "512x512",
+            "src": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/05/Red_circle.svg/480px-Red_circle.svg.png",
+            "sizes": "480x480",
             "type": "image/png"
         }
     ]
