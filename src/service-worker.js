@@ -16,9 +16,16 @@
 // No waiting call here: an update must not swap the wasm under a live tab, or
 // a board in the middle of a fetch would be reading bindings from one version
 // and logic from another. An update takes over once the old tabs close.
+//
+// The fetch handler only ever answers for a URL inside this app's own
+// directory, checked on every request rather than assumed from the scope.
+// Scope is a registration's claim, not a promise, and this app is served from
+// an origin that holds pages which are not this board. The `IS_OWN` test is
+// the half of the allowlist that keeps holding if the scope is ever wrong.
 const ROOT = new URL('./', self.location.href);
 const CACHE = 'london-rura-' + ROOT.pathname + '-__VERSION__';
 const ASSETS = ['./', 'app.js', 'app_bg.wasm', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'icon.svg', 'index.html'].map(p => new URL(p, ROOT).href);
+const IS_OWN = url => url.startsWith(ROOT.href);
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));
 });
@@ -34,8 +41,13 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   // Deliberately leave unrelated pages, API requests, files and blobs alone.
   // api.tfl.gov.uk is not in ASSETS, so this one line is what keeps the live
-  // TfL API out of the cache and lets the app's own error message appear.
-  if (event.request.method !== 'GET' || !ASSETS.includes(event.request.url)) return;
+  // TfL API out of the cache and lets the app's own error message appear. The
+  // directory test is the other half of the same rule -- a URL outside this
+  // app's own directory is never this worker's to answer, whatever the
+  // registration's scope says -- so a mis-scoped worker cannot serve the pages
+  // it shares this origin with.
+  const url = event.request.url;
+  if (event.request.method !== 'GET' || !IS_OWN(url) || !ASSETS.includes(url)) return;
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);
     const cached = await cache.match(event.request);

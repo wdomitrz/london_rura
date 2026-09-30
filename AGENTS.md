@@ -115,13 +115,24 @@ network. So the trade is explicit.
 **What the service worker does.** It caches the eight shell files, so with a
 connection made once over HTTPS the page loads offline, the Rust board starts,
 and it can tell you it has no connection. Its `fetch` handler is an
-allowlist — `ASSETS.includes(event.request.url)` — and returns early for
-everything else, so no request to `api.tfl.gov.uk` is ever answered from the
+allowlist — `ASSETS.includes(url)`, behind `IS_OWN(url)` — and returns early
+for everything else, so no request to `api.tfl.gov.uk` is ever answered from the
 cache, ever stored, or even inspected. There is no `fetch` fallback that would
 cache an API response as a side effect. Both the shell test and the CI site
 check assert the API's absence from the worker, because a stray allowlist entry
 would serve arrivals from a cache that is hours old while the board claims to be
 live.
+
+**Why the scope is stated.** The board registers its worker with an explicit
+scope of `./` and then releases any registration left behind that covers this
+app's directory but is wider than it. A registration outlives the page that
+created it, so a worker installed for a *different* page on the same origin
+keeps answering for this one until something unregisters it — and neither a
+reload nor a newer worker takes that back, because a worker only takes control
+where its own scope reaches. Hence the repair in `ui.rs`: unregister the
+workers that are ours by script path and wider than ours by scope, and leave
+every sibling app on the origin alone. The worker's `IS_OWN` test is the other
+half of the same rule, and it holds even if the scope is ever wrong.
 
 **Why not cache the arrivals.** TfL's arrivals feed is a few minutes deep and
 its `timeToStation` values are relative to the moment of the request. Cached,
@@ -396,7 +407,8 @@ Two things that page view is the only way to get:
 - `ui.rs`: wasm-only. The fetches to TfL — one per line, joined concurrently,
   parsed from bytes — the DOM, the thirty-second refresh timer, the
   `?station=` parameter, the page title, the connectivity notice and the
-  service-worker registration. Every question of *what* to show is answered by
+  service-worker registration — with its scope stated, and the release of any
+  stale wider one. Every question of *what* to show is answered by
   `departures.rs`. The entry point is `#[wasm_bindgen(start)]`; see above for
   why that is not interchangeable with `#[wasm_bindgen]`.
 - `ui.html`: the static shell, copied to `dist/index.html` byte for byte. One

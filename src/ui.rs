@@ -94,6 +94,20 @@ const STATION_PARAM: &str = "station";
 /// thirty seconds anyway, so a faster poll fetches the same numbers more often.
 const REFRESH_MS: i32 = 30_000;
 
+/// The scope this app's worker is registered for.
+///
+/// Stated rather than inherited. Left to itself, a registration's scope is the
+/// directory of the page that registered it — which is right today and silently
+/// wrong the moment the board is published somewhere else, or opened through a
+/// path that resolves higher up the origin. A worker registered for the whole
+/// origin does not serve just this board; it answers for every page on that
+/// origin, including the ones that have nothing to do with it. Naming the scope
+/// keeps that claim as small as the app.
+///
+/// It is the one string that has to agree with `src/service-worker.js`, which
+/// resolves its own directory the same way, from `self.location`.
+const SCOPE: &str = "./";
+
 /// The application's mutable state, shared by the event handlers and the timer.
 struct App {
     window: Window,
@@ -837,11 +851,124 @@ fn watch_connection(app: &Shared) -> Result<(), JsValue> {
 /// `src/service-worker.js`. It is registered, not driven from here: the board
 /// never asks the cache for departures, because a cached arrivals list is
 /// worse than no arrivals list.
+///
+/// Registration is deliberately not awaited. Nothing here can act on the
+/// outcome — the board does not depend on the worker having installed, and the
+/// one failure a reader could act on (no connection) already has its own
+/// message in the departures area — so blocking startup on a promise nobody
+/// waits for would trade a shell that paints immediately for a console line.
+/// The release of a stale registration is likewise started rather than awaited,
+/// and deliberately survives a registration that failed: that is exactly the
+/// case where an older, wider registration may still be in the way.
 fn register_service_worker(window: &Window) -> Result<(), JsValue> {
-    // Relative to the page, so the worker works from any mount point.
+    // Relative to the page, so the worker works from any mount point. The scope
+    // is stated rather than inherited: see [`SCOPE`].
+    let options = web_sys::RegistrationOptions::new();
+    options.set_scope(SCOPE);
     let _ = window
         .navigator()
         .service_worker()
-        .register("./service-worker.js");
+        .register_with_options("./service-worker.js", &options);
+
+    let owned: Window = window.clone();
+    spawn_local(async move {
+        release_stale_registrations(&owned).await;
+    });
     Ok(())
+}
+
+/// Hand this app's own URLs back to the current worker.
+///
+/// A service worker is a registration, and a registration outlives the page
+/// that made it: it is kept by the browser, not by the tab, and it keeps
+/// answering for its scope until something explicitly unregisters it. That is
+/// how a page on this origin can come to be served by a worker installed for a
+/// *different* page, long after the app that installed it was closed. A stale
+/// registration is not corrected by a reload, by a newer version of the board,
+/// or by a newer worker installing itself — the newer worker only takes control
+/// where its own scope reaches, and a wider stale one is still in the way.
+///
+/// So the repair is explicit: find any registration whose scope covers this
+/// app's directory but is not this app's directory, and unregister it. This
+/// app's own registration is left alone, and so is every other app on the
+/// origin — each is scoped to its own directory, and a sibling that never
+/// covered us is not ours to remove.
+///
+/// Failures are ignored on purpose. This is best-effort cleanup of state this
+/// app did not create, and a browser that refuses leaves the reader no worse
+/// off: the board still runs and still caches its own shell.
+async fn release_stale_registrations(window: &Window) {
+    let container = window.navigator().service_worker();
+    let Ok(registrations) = JsFuture::from(container.get_registrations()).await else {
+        return;
+    };
+    let Ok(array) = registrations.dyn_into::<js_sys::Array>() else {
+        return;
+    };
+
+    // This app's own directory, as an absolute URL with a trailing slash. The
+    // board is served from a subdirectory and every URL of ours is inside it.
+    let Ok(home) = window.location().href() else {
+        return;
+    };
+    let Ok(ours) = web_sys::Url::new_with_base(&home, "./") else {
+        return;
+    };
+    let ours = ours.href();
+
+    for entry in array.iter() {
+        let Ok(registration) = entry.dyn_into::<web_sys::ServiceWorkerRegistration>() else {
+            continue;
+        };
+        let scope = registration.scope();
+        // Leave alone any scope that is this app's own, or narrower: a sibling
+        // app mounted inside this directory is legitimate and separate, and
+        // nothing there can intercept us. One test, because the two cases are
+        // the same one: `ours` begins with `scope`.
+        if ours.starts_with(&scope) {
+            continue;
+        }
+        // What is left is a scope that is a *strict* prefix of ours: a worker
+        // that would be consulted for this app's URLs while being registered
+        // for more than this app. A worker is consulted for a URL exactly when
+        // its scope is a prefix of that URL, which is the test above inverted.
+        //
+        // Of those, only our own worker qualifies: a different app's worker
+        // lives in a different directory, so unregistering it would break the
+        // app it belongs to.
+        let script = registration
+            .active()
+            .map(|worker| worker.script_url())
+            .unwrap_or_default();
+        if script_belongs_to_app(&script, &ours) {
+            match registration.unregister() {
+                Ok(promise) => {
+                    let _ = JsFuture::from(promise).await;
+                }
+                Err(error) => warn("a stale service worker could not be released", error),
+            }
+        }
+    }
+}
+
+/// Whether a worker script at `script` is this app's own worker, registered for
+/// more of the origin than this app's directory.
+///
+/// A wider scope means the script sits at the root of this app's own directory
+/// rather than anywhere below it: a sibling app's worker is in a sibling
+/// directory and does not match. `strip_suffix`, not `trim_end_matches` — the
+/// latter strips a *set of characters*, so it would happily eat a directory
+/// named `...e-worker.js` and call it ours, tearing down a sibling's worker.
+fn script_belongs_to_app(script: &str, ours: &str) -> bool {
+    match web_sys::Url::new(script) {
+        Ok(url) => url.href().strip_suffix("service-worker.js") == Some(ours),
+        Err(_) => false,
+    }
+}
+
+/// Report something recoverable. Never a panic, never silent — but never a
+/// status line either, because nothing `ui.rs` writes to `#notice` is about the
+/// app's own plumbing.
+fn warn(context: &str, error: JsValue) {
+    web_sys::console::warn_2(&JsValue::from_str(context), &error);
 }

@@ -213,7 +213,7 @@ jobs:
             exit 1
           fi
           # The handler must still be an allowlist, not a blanket respondWith.
-          if ! grep -q 'ASSETS.includes(event.request.url)' /tmp/sw-code.js; then
+          if ! grep -q 'ASSETS.includes(url)' /tmp/sw-code.js; then
             echo "::error::the service worker no longer allowlists its assets; it must not answer unrelated requests from the cache"
             exit 1
           fi
