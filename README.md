@@ -48,9 +48,10 @@ or the bindings generator, and needs no network.
 ## Stations
 
 The station list comes from twelve small requests — one per line — rather than
-the single 17 MB request the original made. Same 270 stations, 81% fewer
+the single 17 MB request the original made. The same 270 stations, 81% fewer
 bytes, and the largest thing the browser has to parse is one line instead of
-the whole network. The measurements are in `AGENTS.md`.
+the whole network. Stations on several lines arrive more than once and are
+deduplicated. The measurements are in `AGENTS.md`.
 
 ## Checking it actually works
 
