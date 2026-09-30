@@ -319,15 +319,33 @@ pub struct StopPoint {
 }
 
 pub fn station_list(stop_points: Vec<StopPoint>) -> Vec<Station> {
-    let mut stations: Vec<Station> = stop_points
-        .into_iter()
-        .filter(|point| is_station(&point.id, point.name.as_deref()))
-        .map(|point| Station {
+    let mut stations: Vec<Station> = Vec::with_capacity(stop_points.len());
+    // Deduplicate by id, keeping the first sighting.
+    //
+    // The per-line fetch returns a station once per line that serves it, and
+    // most of the big ones are on three or four: Acton Town comes back from
+    // both the Bakerloo and the Piccadilly, Aldgate from the Circle,
+    // Metropolitan and Hammersmith & City. Concatenating twelve responses
+    // therefore yields **383** entries for **270** distinct stations, and a
+    // picker listing Acton Town four times is not a board anyone can use.
+    //
+    // First-wins rather than last-wins, so the entry kept is the one whose line
+    // came earliest in `LINE_IDS`; the name is the same in every response, so
+    // which one survives does not matter to the reader.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for point in stop_points {
+        if !is_station(&point.id, point.name.as_deref()) {
+            continue;
+        }
+        if !seen.insert(point.id.clone()) {
+            continue;
+        }
+        stations.push(Station {
             id: point.id,
             // The filter has just established this is `Some` and non-empty.
             name: point.name.unwrap_or_default(),
-        })
-        .collect();
+        });
+    }
     stations.sort_by(|a, b| {
         a.name
             .to_lowercase()
@@ -562,16 +580,33 @@ fn the_station_sort_is_case_insensitive_and_stable() {
     );
 }
 
-/// Names containing digits sort the way a reader reads them, not the way a
-/// byte comparison does: Bond Street before Bond Street... nothing here, but
-/// 100 goes after 99.
+/// A station served by more than one line arrives once per line, and must
+/// appear in the picker once.
+///
+/// This test used to assert the opposite — "duplicates are kept" — and that was
+/// not an accident of the fixture but the shipped behaviour: concatenating the
+/// twelve per-line responses produced 383 options for 270 stations, with Acton
+/// Town listed three times. It was found by loading the built page and reading
+/// the options, which is the only check that could see it: the single-request
+/// version of this code could not produce duplicates, so no unit test fed from
+/// one response would ever have caught it.
 #[test]
-fn the_station_sort_does_not_reorder_equal_prefixes() {
+fn a_station_served_by_several_lines_is_listed_once() {
+    // Acton Town, as the Bakerloo and the Piccadilly both return it.
     let listed = vec![
-        station("940GZZLUAAA", "Acton Town"),
-        station("940GZZLUAAA", "Acton Town"),
+        station("940GZZLUACT", "Acton Town Underground Station"),
+        station("940GZZLUACT", "Acton Town Underground Station"),
+        station("940GZZLUACT", "Acton Town Underground Station"),
     ];
-    assert_eq!(station_list(listed).len(), 2, "duplicates are kept");
+    let stations = station_list(listed);
+    assert_eq!(
+        stations.len(),
+        1,
+        "a station on three lines is one station, not three: {stations:?}"
+    );
+    assert_eq!(stations[0].name, "Acton Town Underground Station");
+    // The id is the thing the picker submits, so it must survive intact.
+    assert_eq!(stations[0].id, "940GZZLUACT");
 }
 
 /// The filter runs on the way in, so a caller cannot get a non-station past it
@@ -1022,5 +1057,46 @@ fn the_chip_edge_is_a_decision_the_numbers_record() {
             "{line} is dim on both pages"
         );
     }
+}
+
+/// The twelve per-line responses, concatenated the way the browser does, must
+/// give one option per station.
+///
+/// This is the shape that shipped the bug: every line's response in one list,
+/// so an interchange on three lines is present three times. The fixture is a
+/// real slice — Acton Town really is served by the Bakerloo and the Piccadilly,
+/// and really does come back from both.
+#[test]
+fn concatenating_the_line_responses_does_not_repeat_a_station() {
+    let bakerloo = include_bytes!("../tests/fixtures_bakerloo_stoppoints.json");
+    let piccadilly = include_bytes!("../tests/fixtures_piccadilly_stoppoints.json");
+    let mut all: Vec<StopPoint> =
+        serde_json::from_slice(bakerloo).expect("the Bakerloo response");
+    all.extend(
+        serde_json::from_slice::<Vec<StopPoint>>(piccadilly).expect("the Piccadilly response"),
+    );
+    let before = all.len();
+    let stations = station_list(all);
+    assert!(
+        stations.len() < before,
+        "concatenating responses must collapse repeats: {} in, {} out",
+        before,
+        stations.len()
+    );
+    let mut ids: Vec<&str> = stations.iter().map(|s| s.id.as_str()).collect();
+    let unique = ids.len();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), unique, "the picker must hold no repeated station");
+    // Acton Town is on both lines, so it must appear exactly once.
+    assert_eq!(
+        stations
+            .iter()
+            .filter(|s| s.name == "Acton Town Underground Station")
+            .count(),
+        1,
+        "Acton Town is served by the Bakerloo and the Piccadilly and must be \
+         offered once"
+    );
 }
 }

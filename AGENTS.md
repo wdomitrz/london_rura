@@ -307,6 +307,27 @@ and hands the real work to `spawn_local`.
 
 All three are mutation-tested.
 
+### The third bug, found the same way
+
+With the app finally running, the picker held **383 options for 270 stations**,
+and Acton Town appeared three times. The per-line fetch returns a station once
+per line that serves it, and the big interchanges are on three or four lines, so
+concatenating twelve responses repeats them.
+
+`station_list` now deduplicates by id, first sighting wins. Two things are
+worth recording about how it got there:
+
+- **It was documented and tested, and never implemented.** `LINE_IDS` said
+  "a station on three lines appears in three responses and is deduplicated
+  here", and a test asserted no duplicates — but the assertion was over a
+  single response, which cannot contain one. So the comment and the test both
+  *looked* like coverage and covered nothing. The test now concatenates two
+  real per-line responses that genuinely share Acton Town and Alperton, so it
+  fails without the dedupe.
+- **A unit test fed from one response can never catch this.** It is a property
+  of the fetch *strategy*, not of any one payload. Reading the options out of
+  the rendered page is what found it, three bugs running.
+
 ### The second bug, hiding behind the first
 
 Once the app started, it **froze the renderer**. `load_stations` spawned twelve
@@ -354,6 +375,14 @@ of which cost time here:
 
 A page that hangs the renderer produces no DOM at all, which is a distinct
 failure from a page that renders and shows an error — worth telling apart.
+
+Two things that page view is the only way to get:
+
+- **A count that is wrong but not obviously so.** "383 options" looks like a
+  station list. It is 270 stations with 113 repeats, and no assertion anywhere
+  would ever have said so.
+- **Whether a feature works at all**, which is the first two bugs in this
+  section.
 
 ## Code map
 
