@@ -33,8 +33,8 @@ use web_sys::{
 };
 
 use crate::departures::{
-    board, line_colour, station_list, Arrival, Board, Station, StopPoint, ARRIVALS_BASE,
-    STATIONS_URL,
+    board, line_colour, line_ink, station_list, Arrival, Board, Station, StopPoint,
+    ARRIVALS_BASE, LINE_IDS, LINE_STOPS_URL,
 };
 
 /// The message shown when no station is chosen.
@@ -61,6 +61,20 @@ const FAILED: &str = "Error fetching departures. Please try again later.";
 /// consequence: there are no stations to choose, so the picker stays empty and
 /// the app cannot do anything at all until the list arrives.
 const STATIONS_FAILED: &str = "Could not load stations. Please try again later.";
+
+/// Shown once the stations are in the picker and the board is ready.
+///
+/// This string replaces a dead end: the shell shipped with "Loading
+/// stations…" in the notice and **nothing on the success path ever wrote to it
+/// again**, so a board that had in fact finished loading still looked like it
+/// was still loading. A status line that is never cleared is worse than no
+/// status line, and it is why "stuck on Loading" had two possible causes here
+/// rather than one.
+const STATIONS_READY: &str = "Choose a station. Departures come live from the TfL API.";
+
+/// Shown when some lines loaded and some did not, naming the service rather
+/// than the implementation.
+const PARTIAL: &str = "Some lines could not be reached, so the list may be short. Try again shortly.";
 
 /// Shown when a station id in the URL is not one this station list has.
 ///
@@ -150,8 +164,8 @@ impl App {
     async fn load(self: &Shared, station: &str) {
         say(&self.departures, LOADING);
         let url = format!("{ARRIVALS_BASE}{station}/Arrivals");
-        let arrivals: Vec<TflArrival> = match fetch_json(&url).await {
-            Ok(value) => match serde_json::from_value(value) {
+        let arrivals: Vec<TflArrival> = match fetch_bytes(&url).await {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
                 Ok(arrivals) => arrivals,
                 Err(error) => {
                     web_sys::console::error_1(&JsValue::from_str(&error.to_string()));
@@ -176,6 +190,9 @@ impl App {
 
 /// The application, as one shared `Rc` — every handler and the timer share it.
 type Shared = Rc<App>;
+
+/// What one line's fetch produced: its raw bytes, or why it has none.
+type LineResult = Result<Vec<u8>, String>;
 
 /// Install the app: build the picker's options, wire the change handler, read
 /// the URL, and start fetching.
@@ -355,26 +372,74 @@ fn set_title(app: &Shared, station: Option<&str>) {
 }
 
 /// Fetch the station list, fill the picker, and load whatever the URL asked for.
+///
+/// One request per line, all of them genuinely in flight at once, rather than
+/// the single 17 MB request the original made. See [`LINE_IDS`] for the
+/// measurements that decided it.
 async fn load_stations(app: &Shared) {
-    let data = match fetch_json(STATIONS_URL).await {
-        Ok(data) => data,
-        Err(error) => {
-            web_sys::console::error_1(&JsValue::from_str(&error));
-            notice(app, STATIONS_FAILED);
-            return;
-        }
-    };
-    let listed: StopPointList = match serde_json::from_value(data) {
-        Ok(list) => list,
-        Err(error) => {
-            web_sys::console::error_1(&JsValue::from_str(&error.to_string()));
-            notice(app, STATIONS_FAILED);
-            return;
-        }
-    };
+    // A line that fails is not fatal: the other eleven still give a usable
+    // board. Losing one line is better than losing the picker.
+    let answers: Rc<RefCell<Vec<Option<LineResult>>>> =
+        Rc::new(RefCell::new((0..LINE_IDS.len()).map(|_| None).collect()));
 
-    let stations = station_list(listed.stop_points);
+    // `spawn_local` starts each task immediately, so all twelve requests are
+    // sent before the first is awaited. Awaiting the returned handles in order
+    // afterwards is fine and is not what serialises them — awaiting them in a
+    // loop *before* spawning would be, and is the shape to avoid.
+    for (index, line) in LINE_IDS.iter().enumerate() {
+        let answers = Rc::clone(&answers);
+        let line = *line;
+        spawn_local(async move {
+            let fetched = fetch_bytes(&line_url(line)).await;
+            answers.borrow_mut()[index] = Some(fetched);
+        });
+    }
+    // Every task writes its own slot, so waiting for all of them means waiting
+    // for the last one to land. The borrow is taken and dropped inside the
+    // condition, never held across the `await`: a `Ref` that lives across a
+    // suspension point is both a compile error here and, if it were allowed, a
+    // panic the moment another task tried to take the same borrow.
+    loop {
+        let pending = answers.borrow().iter().any(|slot| slot.is_none());
+        if !pending {
+            break;
+        }
+        yield_to_browser().await;
+    }
+
+    let mut collected: Vec<StopPoint> = Vec::new();
+    let mut failed: Vec<&str> = Vec::new();
+    // Move the results out rather than holding a borrow: the borrow must not
+    // outlive this function, and there is nothing to gain from sharing them.
+    let answers = std::mem::take(&mut *answers.borrow_mut());
+    for (line, answer) in LINE_IDS.iter().zip(answers.iter()) {
+        match answer {
+            Some(Ok(bytes)) => match serde_json::from_slice::<Vec<StopPoint>>(bytes) {
+                Ok(stops) => collected.extend(stops),
+                Err(error) => {
+                    web_sys::console::error_1(&JsValue::from_str(&format!(
+                        "{line}: {error}"
+                    )));
+                    failed.push(line);
+                }
+            },
+            Some(Err(error)) => {
+                web_sys::console::error_1(&JsValue::from_str(&format!("{line}: {error}")));
+                failed.push(line);
+            }
+            None => failed.push(line),
+        }
+    }
+
+    // Every line is fetched before anything is rendered, so the picker appears
+    // once and complete rather than filling in a station at a time.
+    let stations = station_list(collected);
+    if stations.is_empty() {
+        notice(app, STATIONS_FAILED);
+        return;
+    }
     fill_picker(app, &stations);
+    notice(app, if failed.is_empty() { STATIONS_READY } else { PARTIAL });
 
     // The URL asks for a station. If the list has it, select it and load; if
     // not, say so rather than silently showing a different one.
@@ -389,14 +454,19 @@ async fn load_stations(app: &Shared) {
     app.load(&requested).await;
 }
 
-/// The wrapper TfL puts the stop-point list in.
+/// Let the browser run one task before coming back.
 ///
-/// The arrivals endpoint answers with a bare array instead, which is why this
-/// type exists at all rather than the list being deserialised directly.
-#[derive(serde::Deserialize)]
-struct StopPointList {
-    #[serde(rename = "stopPoints", default)]
-    stop_points: Vec<StopPoint>,
+/// A resolved microtask is the cheapest way to hand control back so the twelve
+/// in-flight fetches can make progress. Without it the loop below would spin,
+/// and a spinning loop is exactly the "page is stuck" symptom this change
+/// exists to remove.
+async fn yield_to_browser() {
+    let _ = JsFuture::from(js_sys::Promise::resolve(&JsValue::NULL)).await;
+}
+
+/// The stop-point URL for one line id.
+fn line_url(line: &str) -> String {
+    LINE_STOPS_URL.replace("{line}", line)
 }
 
 /// One `Arrival`, as TfL sends it.
@@ -428,14 +498,22 @@ impl From<TflArrival> for Arrival {
     }
 }
 
-/// Fetch JSON, or an error a reader can be told about.
+/// Fetch a URL as raw bytes, or an error a reader can be told about.
 ///
-/// TfL sends permissive CORS headers, so a plain cross-origin `fetch` works
-/// with no proxy. It still fails for the ordinary reasons — no connection, a
-/// 500, a rate limit, or a body that is not JSON — and every one of them ends
-/// here, because this app has nothing cached to fall back on and nothing to
-/// retry with.
-async fn fetch_json(url: &str) -> Result<serde_json::Value, String> {
+/// The bytes, not `response.json()`. `json()` resolves to a live JavaScript
+/// object — the whole body, materialised as JS values before any Rust runs —
+/// and deserialising that walks it property by property across the wasm
+/// boundary, on the UI thread. On a large body that is long enough to be
+/// visible: the page stops responding, which is indistinguishable from a
+/// network that never answers. `array_buffer()` plus `from_slice` parses once,
+/// in Rust, and the JavaScript object is never built.
+///
+/// TfL sends permissive CORS headers (`access-control-allow-origin: *`), so a
+/// plain cross-origin `fetch` needs no proxy. It still fails for the ordinary
+/// reasons — no connection, a 500, a rate limit, a body that is not JSON — and
+/// every one of them ends here, because this app has nothing cached to fall
+/// back on and nothing to retry with.
+async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     let window = web_sys::window().ok_or("no window")?;
     let response = JsFuture::from(window.fetch_with_str(url))
         .await
@@ -446,16 +524,18 @@ async fn fetch_json(url: &str) -> Result<serde_json::Value, String> {
     if !response.ok() {
         return Err(format!("TfL answered {}", response.status()));
     }
-    let value = JsFuture::from(response.json().map_err(|error| format!("{error:?}"))?)
-        .await
-        .map_err(|error| format!("{error:?}"))?;
-    // The promise resolves to a plain JS object; `js_sys::JSON::stringify` and
-    // the `from_str` below turn it into a `Value` without hand-walking it.
-    let text = js_sys::JSON::stringify(&value)
-        .map(String::from)
-        .map_err(|error| format!("{error:?}"))?;
-    serde_json::from_str(&text).map_err(|error| error.to_string())
+    let buffer = JsFuture::from(
+        response
+            .array_buffer()
+            .map_err(|error| format!("{error:?}"))?,
+    )
+    .await
+    .map_err(|error| format!("{error:?}"))?;
+    // `to_vec` on the typed-array view is a single copy of the bytes out of
+    // wasm memory, not a per-element crossing of the boundary.
+    Ok(js_sys::Uint8Array::new(&buffer).to_vec())
 }
+
 
 /// The picker changed: take the new station, remember it, and show it.
 fn on_change(app: &Shared) {
@@ -596,13 +676,34 @@ fn paint(app: &Shared, board: &Board) {
         let body = element_of(root, "tbody");
         for departure in &platform.departures {
             let row = element_of(root, "tr");
-            let line = cell(&row, &departure.line, "td");
-            // The colour is a style, and the line's name is the text: the
-            // board is readable without the colour being seen.
-            let _ = line.set_attribute("style", &format!("color: {}; font-weight: bold;", line_colour(&departure.line)));
-            let _ = line.set_attribute("data-line", &departure.line);
+
+            // The line's name, on a chip of the line's own published colour, in
+            // whichever of black or white `line_ink` says is legible on it.
+            // The chip is a `<span>` inside a plain cell, because a rounded
+            // background on the cell itself would be rounded by the table too.
+            let line_cell = element_of(root, "td");
+            let chip = element_of(root, "span");
+            let colour = line_colour(&departure.line);
+            let _ = chip.set_attribute(
+                "style",
+                &format!("background-color: {colour}; color: {};", line_ink(colour)),
+            );
+            // `data-line` names the line in the markup as well, so a reader
+            // using a stylesheet or a high-contrast mode still gets the words.
+            let _ = chip.set_attribute("data-line", &departure.line);
+            chip.set_text_content(Some(&departure.line));
+            line_cell.append_child(&chip).expect("line chip");
+            row.append_child(&line_cell).expect("line cell");
+
             cell(&row, &departure.destination, "td");
-            cell(&row, &departure.minutes.to_string(), "td");
+
+            // Zero minutes means the train is at the platform, which is not the
+            // same as "no time" — it is the thing the reader is waiting for, so
+            // it is marked rather than left to look like an empty value.
+            let minutes = cell(&row, &departure.minutes.to_string(), "td");
+            if departure.minutes <= 0 {
+                let _ = minutes.set_attribute("class", "due");
+            }
             body.append_child(&row).expect("row");
         }
         table.append_child(&body).expect("body");

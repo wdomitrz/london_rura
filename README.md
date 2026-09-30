@@ -45,6 +45,13 @@ or the bindings generator, and needs no network.
 `start_url` is `"./"`. Any file host will do — nginx, Caddy, GitHub Pages,
 `python3 -m http.server`.
 
+## Stations
+
+The station list comes from twelve small requests — one per line — rather than
+the single 17 MB request the original made. Same 270 stations, 81% fewer
+bytes, and the largest thing the browser has to parse is one line instead of
+the whole network. The measurements are in `AGENTS.md`.
+
 ## Offline
 
 This is the one app in the family that is **not** fully offline, because its

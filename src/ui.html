@@ -12,65 +12,137 @@
 <meta name="description" content="London Rura — a London Underground departures board for every station on the TfL network.">
 <title>London Rura</title>
 <style>
-/* The original's design: Arial, a plain page, grey table headers. Kept, with
-   the parts that only worked on a light desktop given a dark counterpart. */
+/* A departures board, in a departures board's colours.
+   The original was Arial on white with grey table borders, which was legible
+   but had nothing of a board about it. This is the same information laid out
+   the way a platform board lays it out: a near-black face, one warm accent for
+   the times, and the line colours doing the one job they are actually there
+   for.
+
+   The accent is #FFD300 — Circle's yellow, and the colour a real board lights
+   its times in. It is not decoration: the minutes are the thing a reader came
+   for, so they get the only bright colour on the page. Everything else is
+   greyscale, which leaves the line chips as the only other colour present and
+   keeps them competing with nothing.
+
+   Both schemes are chosen against measured contrast, not by eye — see the
+   `line_ink` function in src/departures.rs, which is what decides black or
+   white text on each chip so that all twelve lines clear 4.5:1. */
 :root {
-  color-scheme: light dark;
-  --ink: #111;
-  --paper: #fff;
-  --rule: #ccc;
-  --head: #f0f0f0;
-  --muted: #555;
+  color-scheme: dark light;
+  --paper: #0b0b0c;
+  --panel: #16161a;
+  --ink: #eceff4;
+  --muted: #9aa3b2;
+  --rule: #2a2d33;
+  --accent: #ffd300;   /* the minutes */
+  --due: #ff453a;      /* arriving now */
+  --focus: #4da3ff;
+  /* The chip ring. Two line colours are almost invisible against a page of
+     their own shade -- Northern's black on this page is 1.07:1 and Circle's
+     yellow on the light page is 1.34:1 -- so every chip gets a hairline of
+     the page's ink to give it a defined edge. It is decoration, not data: the
+     line's name is on the chip and does not depend on seeing the fill. */
+  --ring: rgba(236, 239, 244, 0.45);
 }
-@media (prefers-color-scheme: dark) {
-  :root { --ink: #e8e8e8; --paper: #161616; --rule: #3a3a3a; --head: #242424; --muted: #a0a0a0; }
+@media (prefers-color-scheme: light) {
+  :root {
+    --paper: #f6f7f9;
+    --panel: #ffffff;
+    --ink: #14161a;
+    --muted: #5b6472;
+    --rule: #d3d7de;
+    --accent: #8a6d00;  /* the same accent, darkened to stay legible on white */
+    --due: #c2211a;
+    --focus: #0b5bd3;
+    --ring: rgba(20, 22, 26, 0.35);
+  }
 }
 * { box-sizing: border-box; }
 body {
   font-family: Arial, Helvetica, sans-serif;
-  margin: 20px;
+  margin: 0;
+  padding: 16px 16px 40px;
   background: var(--paper);
   color: var(--ink);
-  /* A board is read at arm's length on a phone. */
   font-size: 16px;
   line-height: 1.4;
 }
-h1 { font-size: 1.6rem; margin: 0 0 4px; }
-label { display: block; font-weight: bold; margin: 16px 0 6px; }
+main { max-width: 44rem; margin: 0 auto; }
+h1 {
+  font-size: 1.7rem;
+  margin: 0 0 2px;
+  letter-spacing: -0.01em;
+}
+label {
+  display: block;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 20px 0 6px;
+}
 select {
   font: inherit;
-  /* A large touch target: this is the only control on the page. */
-  padding: 10px;
-  min-height: 44px;
+  /* The one control on the page, so it gets a full-width touch target. */
+  padding: 12px;
+  min-height: 48px;
   width: 100%;
-  max-width: 32rem;
-  background: var(--paper);
+  background: var(--panel);
   color: var(--ink);
   border: 1px solid var(--rule);
-  border-radius: 4px;
+  border-radius: 8px;
 }
-:focus-visible { outline: 3px solid #00a0e2; outline-offset: 2px; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 #notice, .stamp { color: var(--muted); margin: 8px 0 0; }
-.stamp { font-size: 0.9rem; }
-#departures { margin-top: 20px; }
-/* A failed request is a message, not a crash: say so in the accent red rather
-   than in the same grey as everything else. */
+.stamp { font-size: 0.85rem; }
+#departures { margin-top: 22px; }
 #departures p { color: var(--muted); }
-h2 { font-size: 1.3rem; margin: 24px 0 8px; }
-h3 { font-size: 1.05rem; margin: 18px 0 4px; color: var(--muted); }
-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 10px;
+h2 { font-size: 1.15rem; margin: 26px 0 10px; }
+h3 {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 20px 0 0;
 }
-th, td {
-  border: 1px solid var(--rule);
-  padding: 8px 12px;
-  text-align: left;
+table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+th, td { padding: 9px 12px; text-align: left; }
+/* A board has no grid of boxes; the rows are separated by a hairline, the way
+   a split-flap board separates its rows. */
+thead th {
+  font-size: 0.72rem;
+  font-weight: normal;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  border-bottom: 2px solid var(--rule);
 }
-th { background-color: var(--head); }
-/* The last column is a number of minutes: align it so the eye can run down it. */
-td:last-child, th:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr + tr td { border-top: 1px solid var(--rule); }
+tbody td:first-child { padding-left: 0; }
+tbody td:last-child, thead th:last-child { text-align: right; padding-right: 0; }
+/* The minutes: the only bright thing on the page, and the reason for it. */
+td:last-child {
+  color: var(--accent);
+  font-weight: bold;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+/* Zero means "at the platform", which is not "in no time" — it is the thing
+   the reader is waiting for, so it gets its own colour. */
+td.due { color: var(--due); }
+/* The line chip. Its background and text colour are set inline by Rust from
+   the published line colour; this only provides the shape and the edge. The
+   attribute is on the chip, not on the cell it sits in. */
+span[data-line] {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: bold;
+  white-space: nowrap;
+  box-shadow: 0 0 0 1px var(--ring);
+}
 @media (prefers-reduced-motion: no-preference) {
   #departures { animation: settle 160ms ease-out; }
   @keyframes settle { from { opacity: 0.4; } to { opacity: 1; } }

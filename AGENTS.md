@@ -143,6 +143,110 @@ CORS is not a problem: TfL sends permissive `Access-Control-Allow-Origin` on
 this API, so a plain cross-origin `fetch` works with no proxy. It is still
 handled as a failure, because it is one whenever the network is not there.
 
+## The TfL API, measured
+
+Everything here was measured against the live API on 2026-09-30, not read off
+a document, because the documentation and the endpoint disagree and the
+endpoint is what the app talks to. The next app to use this API should take
+these numbers rather than re-deriving them.
+
+| | |
+|---|---|
+| `StopPoint/Mode/tube,elizabeth-line` | **16,958,009 bytes** (17.0 MB), 1,858 stop points, ~2.5 s |
+| of which are stations (`940GZZLU`/`940GZZCR` with a `commonName`) | **270** |
+| `?detail=false` on the same URL | 16,957,998 bytes — a **0.0001%** saving. Accepted and ignored. |
+| the 12 × `Line/<id>/StopPoints` | **3,255,303 bytes** total, 12 requests, **81% less** |
+| `Line/Mode/tube` (line ids only) | 6,717 bytes |
+| CORS on a real GET | `access-control-allow-origin: *` |
+| CORS on a HEAD request | **absent** — do not use HEAD to check CORS here |
+
+Three findings that each cost something:
+
+**1. The payload is 95% two fields nobody reads.** `children` is 9.0 MB and
+`additionalProperties` is 7.1 MB; together that is 16.1 MB of the 17.0. The
+board reads two fields, `id` and `commonName`, which together are 70 KB.
+There is no parameter that strips them, which is why the fix below changes
+*which endpoint* is called rather than asking for less of this one.
+
+**2. There is no smaller station-list endpoint.** `StopPoint/Search/{name}` is
+343 bytes but is a name search, not a list. `StopPoint/{id}` is 37 KB for one
+stop point. `Line/Mode/<mode>` returns 6.7 KB of line metadata, and
+`Line/<id>/StopPoints` returns one line's stations as a bare array. The last
+one is the answer: fetching all twelve lines gives **exactly the same 270
+stations** — verified by diffing the two sets, identical, no station missing
+and none extra — for 81% fewer bytes, with a maximum single response of one
+line rather than the whole network. Stations served by three lines appear three
+times and are deduplicated.
+
+**3. The stop-point list sends `id`, not `stopPointId`.** The older TfL Unified
+API documentation shows `stopPointId`; the live endpoint does not send it, and
+of 1,858 stop points, **zero** carry it. Deserialising that name leaves every
+id as the empty string, every id fails the prefix test, and the picker is
+permanently empty **with no error reported anywhere** — which is exactly what
+"stuck on Loading stations…" looked like. The arrivals list disagrees in the
+other direction and has no id at all. `the_wire_formats_still_parse` and
+`a_real_stop_point_response_yields_stations` now pin this against a fixture
+taken from a real response.
+
+### Why the fix is per-line, and parse from bytes
+
+`response.json()` resolves the whole body to a live JavaScript object, and
+deserialising *that* walks the object graph property by property across the
+wasm boundary, on the UI thread. On 17 MB that is long enough to be seen: the
+page stops responding, which is indistinguishable from a network that never
+answers. The app now uses `array_buffer()` and `serde_json::from_slice`, which
+parses once in Rust and never builds the JavaScript object.
+
+Both changes are needed, and neither is sufficient alone. Bytes-only still
+parses 17 MB; per-line only still builds a JS object out of 3 MB. Together the
+largest thing the UI thread ever deserialises is one line's stop points.
+
+## The colour scheme, and why
+
+The original was Arial on white with grey borders: legible, and not a board.
+The scheme now is a platform board's — a near-black face, greyscale text, and
+one warm accent — chosen against measured contrast rather than by eye.
+
+- **The minutes are the only bright thing.** They are what the reader came
+  for, so they get the only saturated colour on the page: `#FFD300`, Circle's
+  yellow and the colour a real board lights its times in. Everything else is
+  greyscale, which leaves the line chips as the only other colour present.
+- **Zero minutes is marked, not left blank.** A train at the platform is not
+  "no time", it is the thing the reader is waiting for, so it gets the red
+  `#FF453A` and a `due` class.
+- **Rows are separated by a hairline, not boxed.** A split-flap board has no
+  grid; the tables read as a list of departures rather than a spreadsheet.
+
+**The interesting problem is the line colours, and it has no solution in
+CSS.** The published line colours are the one piece of visual information a
+reader actually uses, and they are not all legible on any single background.
+Circle's `#FFD300` is 1.44:1 on white; Victoria's `#00A0E2` is 2.95:1; the
+three pale lines are under 2:1. On a dark page, District drops to 3.49:1 and
+Metropolitan to 2.37:1. **No background works for all twelve**, so the
+original's black-on-white table left three lines unreadable.
+
+So each line's name is drawn on a **chip of its own colour**, in whichever of
+black or white is legible on it — and that choice is *computed*, not made by
+hand, in `line_ink`, from the WCAG relative-luminance formula in
+`departures.rs`. All twelve now clear **4.5:1** (worst: Bakerloo at 4.70:1,
+best: Northern at 21:1), and `every_line_is_readable_on_its_own_chip` fails if
+a new line's colour cannot. The colour is still the first thing the eye goes
+to; the text is what survives when the colour cannot be seen, which also makes
+the board readable for a colour-blind reader or on a dimmed screen.
+
+**One thing contrast on the chip does not solve: finding the chip at all.**
+Northern's `#000000` is 1.07:1 against the dark page and Circle's `#FFD300` is
+1.34:1 against the light one — in each scheme exactly one line's chip is an
+invisible rectangle. No fill can fix that without falsifying the published
+colour, so every chip gets a hairline ring in the page's ink colour. The ring
+is decoration, not the accessibility mechanism: the line's name is on the chip
+either way. This was caught by looking at a rendered board, not by a test, and
+`the_chip_edge_is_a_decision_the_numbers_record` now pins the numbers behind it.
+
+Both schemes are `prefers-color-scheme` driven, dark first, and the accent is
+darkened to `#8a6d00` in the light scheme so it keeps its contrast against a
+white page.
+
 ## Code map
 
 - `departures.rs`: the whole board, with no browser in it. The stop-point
@@ -152,10 +256,11 @@ handled as a failure, because it is one whenever the network is not there.
   in the name, `floor(timeToStation / 60)`, the ten-per-platform cut, and the
   line-colour table with its `#666` default. Pure, and the unit tests at the
   bottom of the file drive all of it with fixture data.
-- `ui.rs`: wasm-only. The `fetch` to TfL, the DOM, the thirty-second refresh
-  timer, the `?station=` parameter, the page title, the connectivity notice and
-  the service-worker registration. Every question of *what* to show is answered
-  by `departures.rs`.
+- `ui.rs`: wasm-only. The fetches to TfL — one per line, concurrent, parsed
+  from bytes — the DOM, the thirty-second refresh timer, the `?station=`
+  parameter, the page title, the connectivity notice and the service-worker
+  registration. Every question of *what* to show is answered by
+  `departures.rs`.
 - `ui.html`: the static shell, copied to `dist/index.html` byte for byte. One
   inline `<style>`, one `<script type="module">`, and empty containers Rust
   fills.
@@ -189,6 +294,13 @@ choice. Each of these was decided deliberately and is pinned by a test:
   would overflow a parse and wrap negative, sending the table to the wrong end
   of the screen. The digits are read as `i64` and a value that does not fit
   sorts as 0.
+- **A deserialised field that is not there is not an error.** `stopPointId`
+  against a payload that sends `id` deserialises to an empty string for every
+  record, silently, and the filter then drops everything. `#[serde(default)]` on
+  a field that should always be present is what turns a loud parse failure into
+  a silent empty board. The fixtures for the wire formats are now transcribed
+  from real responses, because a fixture written to match the code cannot catch
+  this.
 - **`innerHTML` is not `set_text_content`.** The original built the board as an
   HTML string, so a destination called `<script>` would have been a script. The
   board is built from elements, and every value that reaches the page goes
@@ -243,6 +355,14 @@ browser, no network and no `web-sys`, driven by fixture data. One of them
 parses the JSON shapes TfL actually sends, because a fixture built in Rust
 cannot catch a field renamed upstream.
 
+Two tests carry real weight beyond coverage. `a_real_stop_point_response_
+yields_stations` parses a fixture cut from an actual API response and fails if
+the picker comes out empty — the check that would have caught the `stopPointId`
+bug, and it reproduces the reported symptom exactly (`left: []`). And
+`every_line_is_readable_on_its_own_chip` fails if any line's colour cannot
+reach 4.5:1 against its own ink, which makes the colour scheme a property of
+the code rather than a matter of taste.
+
 `tests/shell.rs` asserts the invariants of the committed shell and of what is
 committed: no user-visible string names the implementation (see above), the page
 loads the generated bindings and not a manual wasm ABI,
@@ -288,6 +408,11 @@ pinned in the workflow.
   refresh, and the notice says so.
 - The board shows what TfL's free API returns, which is a few minutes of
   arrivals and nothing further out. There is no timetable view.
+- The station list costs twelve requests instead of one, issued concurrently.
+  They are cached by TfL, so this is cheap, but it is not free, and a reader on a
+  slow connection waits for the slowest line rather than the fastest. A single
+  line failing is not fatal — the other eleven still load and the notice says
+  so — but that line's stations are simply missing until the page is reloaded.
 - `lineName` values are matched exactly against the twelve published lines. A
   new line, or a renamed one, renders in the `#666` grey until the table in
   `departures.rs` learns it. That is the original's behaviour and is a
