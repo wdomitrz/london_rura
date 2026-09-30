@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The author's own icon, committed as SVG and linked directly. The PNGs the
+     manifest and iOS use are rasterized from this same file at build time. -->
+<link rel="icon" href="./icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<link rel="manifest" href="./manifest.webmanifest">
+<meta name="theme-color" content="#000000">
+<meta name="description" content="London Rura — a London Underground departures board for every station on the TfL network.">
+<title>London Rura</title>
+<style>
+/* The original's design: Arial, a plain page, grey table headers. Kept, with
+   the parts that only worked on a light desktop given a dark counterpart. */
+:root {
+  color-scheme: light dark;
+  --ink: #111;
+  --paper: #fff;
+  --rule: #ccc;
+  --head: #f0f0f0;
+  --muted: #555;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --ink: #e8e8e8; --paper: #161616; --rule: #3a3a3a; --head: #242424; --muted: #a0a0a0; }
+}
+* { box-sizing: border-box; }
+body {
+  font-family: Arial, Helvetica, sans-serif;
+  margin: 20px;
+  background: var(--paper);
+  color: var(--ink);
+  /* A board is read at arm's length on a phone. */
+  font-size: 16px;
+  line-height: 1.4;
+}
+h1 { font-size: 1.6rem; margin: 0 0 4px; }
+label { display: block; font-weight: bold; margin: 16px 0 6px; }
+select {
+  font: inherit;
+  /* A large touch target: this is the only control on the page. */
+  padding: 10px;
+  min-height: 44px;
+  width: 100%;
+  max-width: 32rem;
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+}
+:focus-visible { outline: 3px solid #00a0e2; outline-offset: 2px; }
+#notice, .stamp { color: var(--muted); margin: 8px 0 0; }
+.stamp { font-size: 0.9rem; }
+#departures { margin-top: 20px; }
+/* A failed request is a message, not a crash: say so in the accent red rather
+   than in the same grey as everything else. */
+#departures p { color: var(--muted); }
+h2 { font-size: 1.3rem; margin: 24px 0 8px; }
+h3 { font-size: 1.05rem; margin: 18px 0 4px; color: var(--muted); }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+}
+th, td {
+  border: 1px solid var(--rule);
+  padding: 8px 12px;
+  text-align: left;
+}
+th { background-color: var(--head); }
+/* The last column is a number of minutes: align it so the eye can run down it. */
+td:last-child, th:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: no-preference) {
+  #departures { animation: settle 160ms ease-out; }
+  @keyframes settle { from { opacity: 0.4; } to { opacity: 1; } }
+}
+</style>
+</head>
+<body>
+<main>
+  <h1>London Rura</h1>
+  <p id="notice" role="status" aria-live="polite">Loading stations…</p>
+
+  <label for="station">Station</label>
+  <!-- Rust builds every option; this shell supplies only the empty first one,
+       which is also how the reader returns to "no station". -->
+  <select id="station" name="station" aria-describedby="notice">
+    <option value="">Select a station</option>
+  </select>
+
+  <div id="departures" aria-live="polite" aria-busy="false"></div>
+</main>
+
+<noscript>This board needs JavaScript enabled to load the Rust WebAssembly application. Departures come from the live TfL API.</noscript>
+<!-- The only JavaScript in this app: a dynamic import of the generated
+     bindings, and a message if that fails. Everything else is Rust. -->
+<script type="module">
+import('./app.js').then(m => m.default()).catch(error => { document.getElementById('notice').textContent = 'London Rura could not start.'; const box = document.getElementById('departures'); box.textContent = 'Could not load the Rust board. Reload the page or check your connection. ' + error; });
+</script>
+</body>
+</html>
