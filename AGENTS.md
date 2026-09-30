@@ -378,6 +378,39 @@ pure and are covered above; everything that touches the DOM is Rust building
 elements rather than a string being parsed, so a browser would be testing the
 DOM library.
 
+## The CI check step, and a trap in it
+
+The first run of this workflow on `master` was **red with every one of the
+eight files reported `ok`**. The build was fine; the check could not run:
+
+```python3 -c '
+    import json, sys
+    ...
+'
+```
+
+`python3 -c` hands the string to the interpreter exactly as written, so the
+indentation of a multi-line body is an `IndentationError` before a single
+statement executes. The sibling failure mode is worse: an apostrophe anywhere
+in the body terminates the shell quote, and bash never reaches Python at all.
+Both forms look correct in review and fail only on a runner.
+
+The fix is the heredoc, `python3 - <<'PY'`, with the body at the same
+indentation as the `python3` line — the YAML block scalar dedents the whole
+step, so the terminator lands in column 0.
+
+`tests/shell.rs` now asserts there is no inline `python3` flag in the workflow
+(that is always a mistake, never a style choice), that every heredoc is
+terminated, and that the seven build steps are present under their exact
+names. Exact names matter: a substring check for `Lint` is satisfied by a step
+renamed `Linting`, which is the quiet drift that leaves a job green and
+unverified. Those assertions are mutation-tested, so they are known to fail
+when the workflow is broken.
+
+To rehearse a workflow change without waiting for a runner, extract the
+`run:` scripts and execute them under `bash -euo pipefail`, which is what
+GitHub does.
+
 ## Verification
 
 ```

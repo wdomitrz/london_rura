@@ -474,6 +474,82 @@ fn contains_word(haystack: &str, word: &str) -> bool {
     false
 }
 
+/// The CI workflow must be runnable.
+///
+/// This repository's first CI run was red on `master` with every one of the
+/// eight files reported `ok`: the build was fine and the *check* could not
+/// run. `python3 -c '…'` with an indented multi-line body is an
+/// `IndentationError` before the interpreter reads a statement, and an
+/// apostrophe anywhere in that body ends the shell quote, so bash never reaches
+/// Python at all. The form looks correct in review and fails only on a runner.
+///
+/// So: no `python3 -c` in the workflow, and every heredoc terminated. A
+/// `python3 -c` here is always a mistake, never a style choice.
+#[test]
+fn the_workflow_can_actually_run_its_checks() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/build.yml");
+    let workflow = std::fs::read_to_string(&path).expect("the workflow");
+    // Only the lines that actually run: a comment explaining why the form is
+    // banned must not make this test fail, which is the same trap as a shell
+    // assertion matching its own documentation.
+    let code: String = workflow
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !code.contains("python3 -c"),
+        "the workflow uses the inline `python3` flag; an indented body is an \
+         IndentationError and an apostrophe ends the shell quote. Use a heredoc."
+    );
+    // Every heredoc that is opened is closed. The terminator may be indented —
+    // the YAML block scalar dedents the whole step, so it lands in column 0 —
+    // but it must be the only thing on its line.
+    let opened = workflow.matches("<<'PY'").count();
+    let closed = workflow
+        .lines()
+        .filter(|line| line.trim() == "PY")
+        .count();
+    assert_eq!(
+        opened, closed,
+        "{opened} heredocs are opened and {closed} are closed; an unterminated \
+         one swallows the rest of the step"
+    );
+    // And the steps the build depends on are all still there, by name. Matched
+    // as whole `- name:` lines, not by substring: `contains("Lint")` is
+    // satisfied by a step renamed "Linting", which is precisely the sort of
+    // quiet drift that leaves a job green and unverified.
+    for step in [
+        "Build the board (wasm target)",
+        "Generate the web bindings",
+        "Build the rest of the site",
+        "Check the built site",
+        "Run the tests",
+        "Lint",
+        "Upload the built site",
+    ] {
+        let named = workflow
+            .lines()
+            .any(|line| line.trim() == format!("- name: {step}"));
+        assert!(named, "the workflow lost or renamed its step: {step}");
+    }
+    // Both targets are linted, and the site check names all eight files.
+    assert!(workflow.contains("--all-targets -- -D warnings"));
+    assert!(workflow.contains("--lib --target wasm32-unknown-unknown -- -D warnings"));
+    for file in [
+        "app_bg.wasm",
+        "app.js",
+        "icon-192.png",
+        "icon-512.png",
+        "icon.svg",
+        "index.html",
+        "manifest.webmanifest",
+        "service-worker.js",
+    ] {
+        assert!(workflow.contains(file), "the site check omits {file}");
+    }
+}
+
 /// Nothing generated may be tracked — not the wasm, not the bindings, not the
 /// site, and not the install PNGs. This is the test that would have caught any
 /// of them being committed.

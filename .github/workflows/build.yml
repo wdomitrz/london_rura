@@ -224,17 +224,46 @@ jobs:
             || { echo "::error::dist/app.js carries no exports; the page's dynamic import would fail"; exit 1; }
           # The manifest is assembled by build.rs, so a shape that drifted from
           # the spec is caught here rather than by a launcher refusing it.
-          python3 -c '
-            import json, sys
-            m = json.load(open("dist/manifest.webmanifest"))
-            for key in ("id", "start_url", "scope"):
-                assert m[key] == "./", f"{key} must be relative, got {m[key]!r}"
-            assert m["name"] == "London Rura" and m["short_name"] == "London Rura", "the name must be preserved"
-            assert m["theme_color"] == "#000000", "the theme colour must be the original one"
-            assert m["background_color"] == "#ffffff", "the background colour must be the original one"
-            sizes = sorted(i["sizes"] for i in m["icons"])
-            assert sizes == ["192x192", "512x512"], f"unexpected icon sizes {sizes}"
-          '
+          # A heredoc, not `python3 -c '...'`. Two reasons, both of which have
+          # cost this family a red run: `-c` hands the string to the interpreter
+          # as-is, so the indentation of a multi-line body is an
+          # IndentationError before a single line runs; and an apostrophe
+          # anywhere in the body ends the shell quote, so bash never reaches
+          # Python at all. The body sits at the same indentation as the
+          # `python3` line, which the YAML block scalar dedents to column 0.
+          python3 - <<'PY'
+          import json
+          m = json.load(open("dist/manifest.webmanifest"))
+          for key in ("id", "start_url", "scope"):
+              assert m[key] == "./", f"{key} must be relative, got {m[key]!r}"
+          assert m["name"] == "London Rura", "the name must be preserved"
+          assert m["short_name"] == "London Rura", "the short name must be preserved"
+          assert m["theme_color"] == "#000000", "the theme colour must be the original one"
+          assert m["background_color"] == "#ffffff", "the background colour must be the original one"
+          assert m["display"] == "standalone", "the original display mode must be preserved"
+          sizes = sorted(i["sizes"] for i in m["icons"])
+          assert sizes == ["192x192", "512x512"], f"unexpected icon sizes {sizes}"
+          print("  ok   the manifest kept its name, colours and display mode")
+          PY
+
+          # The published SVG must be the committed icon, byte for byte. The
+          # page links it and the worker precaches it, and the two PNGs are
+          # rasterized from it, so a drift here is a wrong favicon, an install
+          # icon from somewhere else, and a cache entry that is not the source
+          # of the rest. This is the one repo in the family that had to create
+          # its icon rather than preserve one, so its bytes are pinned here.
+          python3 - <<'PY'
+          import hashlib
+          with open("assets/icon.svg", "rb") as handle:
+              source = handle.read()
+          with open("dist/icon.svg", "rb") as handle:
+              published = handle.read()
+          assert published == source, "dist/icon.svg is not the committed icon"
+          assert hashlib.sha256(source).hexdigest() == (
+              "556cda36a81f7a1176782a740596e169fec8bd7f6ab8a17985a1d6cc0dfa36bb"
+          ), "assets/icon.svg is no longer the credited roundel from Wikimedia"
+          print("  ok   dist/icon.svg is the committed, credited roundel")
+          PY
 
       - name: Run the tests
         run: cargo test --locked
