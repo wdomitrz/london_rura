@@ -222,6 +222,17 @@ jobs:
           # long after the build looked fine.
           grep -q 'export' dist/app.js \
             || { echo "::error::dist/app.js carries no exports; the page's dynamic import would fail"; exit 1; }
+          # The glue must actually RUN the app. This is the check that would
+          # have caught the app shipping four times with a green build and a
+          # page that did nothing: a plain `#[wasm_bindgen]` entry point is an
+          # ordinary export, the glue does not re-export it, so the loader's
+          # `m.default()` initialises the module and nothing ever calls the
+          # board. The symptom is a page that sits on its loading message
+          # forever with no error anywhere, and every test that could run had
+          # passed. `#[wasm_bindgen(start)]` makes the glue emit a call to the
+          # start section; if that call is absent, the app cannot start.
+          grep -q '__wbindgen_start' dist/app.js \
+            || { echo "::error::dist/app.js never calls the wasm start section; the board would load and then do nothing. Is the entry point marked #[wasm_bindgen(start)]?"; exit 1; }
           # The manifest is assembled by build.rs, so a shape that drifted from
           # the spec is caught here rather than by a launcher refusing it.
           # A heredoc, not `python3 -c '...'`. Two reasons, both of which have

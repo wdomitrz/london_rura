@@ -550,6 +550,73 @@ fn the_workflow_can_actually_run_its_checks() {
     }
 }
 
+/// The board must actually start.
+///
+/// This app shipped four times with a green build, a green test run, a green
+/// CI job and a page that did nothing at all. Every check that could run had
+/// passed, because the failure was not an error: **nothing was running**, so
+/// there was nothing to fail.
+///
+/// The cause was the start function. A plain `#[wasm_bindgen]` declares an
+/// ordinary export; `wasm-bindgen` puts the symbol in the wasm and does *not*
+/// re-export it, so the generated glue's only exports are `initSync` and
+/// `__wbg_init as default`. The shell's loader calls the default export, which
+/// initialises the module — and never calls the app. `#[wasm_bindgen(start)]` is
+/// what makes `wasm-bindgen` emit a start section that the glue invokes.
+///
+/// This asserts the source has the right attribute, because that is the part
+/// that is in the repository and the part every earlier check was blind to. The
+/// generated glue's own call is asserted in CI, where `dist/` exists.
+#[test]
+fn the_board_declares_a_start_function() {
+    let source = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui.rs"),
+    )
+    .expect("the browser layer");
+    assert!(
+        source.contains("#[wasm_bindgen(start)]"),
+        "src/ui.rs must mark its entry point with #[wasm_bindgen(start)]. A \
+         plain #[wasm_bindgen] is an unreachable export: the glue does not \
+         re-export it, nothing calls the app, and the page sits on its loading \
+         message forever with no error."
+    );
+    assert!(
+        !source.contains("\n#[wasm_bindgen]\npub fn start"),
+        "the start function must not also be a plain export"
+    );
+    // The start function cannot be awaited, so its first act must hand the real
+    // work to the microtask queue rather than trying to run it inline.
+    let after = source
+        .split("pub fn start()")
+        .nth(1)
+        .expect("a start function");
+    let body = &after[..after.len().min(2000)];
+    assert!(
+        body.contains("spawn_local"),
+        "the start function is synchronous and must hand async work to \
+         spawn_local"
+    );
+}
+
+/// The loader must not depend on a function that does not exist.
+///
+/// `m.default()` is the module's *initializer*, not the app. That is correct
+/// and is what the reference does — but it is only correct because the start
+/// section runs inside it, which is the previous test's subject. Asserting the
+/// loader does not reach for `m.start()` keeps the two halves honest: there is
+/// no `start` export to reach for.
+#[test]
+fn the_loader_only_asks_for_the_initializer() {
+    let page = shell();
+    assert!(page.contains("import('./app.js')"), "the dynamic import");
+    assert!(page.contains("m.default()"), "the initializer is the default export");
+    assert!(
+        !page.contains("m.start(") && !page.contains(".start()"),
+        "there is no start export to call; the app runs from the wasm start \
+         section when the module is initialised"
+    );
+}
+
 /// Nothing generated may be tracked — not the wasm, not the bindings, not the
 /// site, and not the install PNGs. This is the test that would have caught any
 /// of them being committed.

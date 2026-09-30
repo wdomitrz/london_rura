@@ -52,6 +52,20 @@ the single 17 MB request the original made. Same 270 stations, 81% fewer
 bytes, and the largest thing the browser has to parse is one line instead of
 the whole network. The measurements are in `AGENTS.md`.
 
+## Checking it actually works
+
+`cargo test` and CI do not prove this page runs — see the two bugs recorded in
+`AGENTS.md`, both of which passed every automated check. To see the board for
+real:
+
+```bash
+cd dist && setsid python3 -m http.server 8099 &
+chromium --headless --disable-gpu --no-sandbox \
+         --virtual-time-budget=40000 --dump-dom http://127.0.0.1:8099/index.html
+```
+
+The notice must leave "Loading stations…" and the station list must fill.
+
 ## Offline
 
 This is the one app in the family that is **not** fully offline, because its

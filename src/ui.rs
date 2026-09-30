@@ -22,6 +22,8 @@
 //! has an empty picker and says why.
 
 use std::cell::RefCell;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 
 use wasm_bindgen::prelude::*;
@@ -194,13 +196,30 @@ type Shared = Rc<App>;
 /// What one line's fetch produced: its raw bytes, or why it has none.
 type LineResult = Result<Vec<u8>, String>;
 
+/// One line's fetch, boxed and pinned so the futures can be polled by hand.
+type LineRequest = Pin<Box<dyn Future<Output = (&'static str, LineResult)>>>;
+
 /// Install the app: build the picker's options, wire the change handler, read
 /// the URL, and start fetching.
 ///
-/// Called from the shell's loader, through the generated bindings. Returns a
-/// `JsValue` only so a failure can be reported to the loader's catch; the app
-/// renders its own messages for anything a user can act on.
-#[wasm_bindgen]
+/// **`#[wasm_bindgen(start)]`, and that attribute is the whole reason this app
+/// worked at all.** It marks the function as the module's start function, which
+/// `wasm-bindgen` emits into the wasm's start section and the generated glue
+/// calls during initialization. A plain `#[wasm_bindgen]` — which is what this
+/// was — declares an ordinary *export*: the symbol is in the wasm, and the glue
+/// does not re-export it, so there is no way to reach it from JavaScript. The
+/// shell's loader calls the module's default export, which only initializes the
+/// module, and nothing ever called this. The result was a page that loaded
+/// cleanly, drew its static shell, and then sat on "Loading stations…" forever
+/// with no error anywhere — because nothing had failed. Nothing was running.
+///
+/// The body is synchronous on purpose: a start function cannot be awaited, so
+/// the first thing it does is hand the real work to `spawn_local`.
+///
+/// The return value is a `JsValue` purely so a failure during setup can
+/// surface as a thrown error for the loader's `catch`; the app renders its own
+/// messages for anything a user can act on.
+#[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsValue> {
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
     let document = window
@@ -377,57 +396,48 @@ fn set_title(app: &Shared, station: Option<&str>) {
 /// the single 17 MB request the original made. See [`LINE_IDS`] for the
 /// measurements that decided it.
 async fn load_stations(app: &Shared) {
-    // A line that fails is not fatal: the other eleven still give a usable
-    // board. Losing one line is better than losing the picker.
-    let answers: Rc<RefCell<Vec<Option<LineResult>>>> =
-        Rc::new(RefCell::new((0..LINE_IDS.len()).map(|_| None).collect()));
-
-    // `spawn_local` starts each task immediately, so all twelve requests are
-    // sent before the first is awaited. Awaiting the returned handles in order
-    // afterwards is fine and is not what serialises them — awaiting them in a
-    // loop *before* spawning would be, and is the shape to avoid.
-    for (index, line) in LINE_IDS.iter().enumerate() {
-        let answers = Rc::clone(&answers);
-        let line = *line;
-        spawn_local(async move {
-            let fetched = fetch_bytes(&line_url(line)).await;
-            answers.borrow_mut()[index] = Some(fetched);
-        });
-    }
-    // Every task writes its own slot, so waiting for all of them means waiting
-    // for the last one to land. The borrow is taken and dropped inside the
-    // condition, never held across the `await`: a `Ref` that lives across a
-    // suspension point is both a compile error here and, if it were allowed, a
-    // panic the moment another task tried to take the same borrow.
-    loop {
-        let pending = answers.borrow().iter().any(|slot| slot.is_none());
-        if !pending {
-            break;
-        }
-        yield_to_browser().await;
-    }
+    // Every line is fetched, and the futures are awaited directly. Two earlier
+    // designs were wrong and both looked right:
+    //
+    // * Awaiting them one after another serialised the requests, which is the
+    //   one thing the per-line fetch was for.
+    // * Spawning each with `spawn_local` and then *polling a shared cell* until
+    //   every slot was filled locked the renderer. A microtask yield — a
+    //   resolved `Promise` awaited from Rust — does not hand control back to the
+    //   browser's event loop, so the polling loop starved the very tasks it was
+    //   waiting for, forever. The page hung, with no error, and the wasm was
+    //   doing exactly what it was told.
+    //
+    // What is needed is the two halves of `futures::join_all`, which this crate
+    // does not depend on and which is a few lines: poll each future once per
+    // turn, and await whatever is ready before polling again. `wasm_bindgen_
+    // futures` already polls the outer future on every microtask tick, so
+    // awaiting a single `join` future built from all twelve is both concurrent
+    // and non-blocking.
+    let requests: Vec<LineRequest> = LINE_IDS
+        .iter()
+        .map(|line| {
+            let line: &str = line;
+            Box::pin(async move { (line, fetch_bytes(&line_url(line)).await) }) as LineRequest
+        })
+        .collect();
+    let results: Vec<(&'static str, LineResult)> = join_all(requests).await;
 
     let mut collected: Vec<StopPoint> = Vec::new();
     let mut failed: Vec<&str> = Vec::new();
-    // Move the results out rather than holding a borrow: the borrow must not
-    // outlive this function, and there is nothing to gain from sharing them.
-    let answers = std::mem::take(&mut *answers.borrow_mut());
-    for (line, answer) in LINE_IDS.iter().zip(answers.iter()) {
-        match answer {
-            Some(Ok(bytes)) => match serde_json::from_slice::<Vec<StopPoint>>(bytes) {
+    for (line, result) in &results {
+        match result {
+            Ok(bytes) => match serde_json::from_slice::<Vec<StopPoint>>(bytes) {
                 Ok(stops) => collected.extend(stops),
                 Err(error) => {
-                    web_sys::console::error_1(&JsValue::from_str(&format!(
-                        "{line}: {error}"
-                    )));
+                    web_sys::console::error_1(&JsValue::from_str(&format!("{line}: {error}")));
                     failed.push(line);
                 }
             },
-            Some(Err(error)) => {
+            Err(error) => {
                 web_sys::console::error_1(&JsValue::from_str(&format!("{line}: {error}")));
                 failed.push(line);
             }
-            None => failed.push(line),
         }
     }
 
@@ -454,14 +464,85 @@ async fn load_stations(app: &Shared) {
     app.load(&requested).await;
 }
 
-/// Let the browser run one task before coming back.
+/// Await every future concurrently, and return the results in order.
 ///
-/// A resolved microtask is the cheapest way to hand control back so the twelve
-/// in-flight fetches can make progress. Without it the loop below would spin,
-/// and a spinning loop is exactly the "page is stuck" symptom this change
-/// exists to remove.
+/// This is `futures::join_all`, written out because the crate does not depend
+/// on `futures` and one combinator does not justify it. The part that matters is
+/// that it does **not** await the futures in sequence: it polls every one of
+/// them on each turn of the loop and only yields when none of them is ready, so
+/// all of them make progress at once.
+///
+/// A naive `for future in futures { out.push(future.await) }` here would compile,
+/// pass every test, and serialise twelve requests into twelve round trips — the
+/// exact thing the per-line fetch exists to avoid. Both this and a polling loop
+/// over a shared cell have shipped in this file; the second froze the page, and
+/// the first would have been invisible.
+async fn join_all<F>(mut futures: Vec<Pin<Box<dyn Future<Output = F>>>>) -> Vec<F> {
+    use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+    // A no-op waker. Polling by hand needs a `Context`, and the outer future is
+    // already being driven by `wasm_bindgen_futures` on every microtask tick,
+    // so nothing here schedules anything: this only asks each inner future
+    // whether it is ready *right now*.
+    fn noop(_: *const ()) {}
+    fn clone(_: *const ()) -> RawWaker {
+        RawWaker::new(std::ptr::null(), &VTABLE)
+    }
+    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+    let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+    let mut context = Context::from_waker(&waker);
+
+    let mut slots: Vec<Option<F>> = (0..futures.len()).map(|_| None).collect();
+    let mut pending = futures.len();
+    while pending > 0 {
+        let mut progressed = false;
+        for (index, future) in futures.iter_mut().enumerate() {
+            if slots[index].is_some() {
+                continue;
+            }
+            // The futures are already pinned in their boxes and are never moved
+            // out — `slots` only receives their results — so polling by
+            // reference here is sound.
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => {
+                    slots[index] = Some(value);
+                    pending -= 1;
+                    progressed = true;
+                }
+                Poll::Pending => {}
+            }
+        }
+        if pending > 0 && !progressed {
+            // Nothing was ready, so give the browser a turn: the fetches behind
+            // these futures cannot resolve until it has one. This is a real
+            // event-loop yield (a macrotask via a zero-delay timer), not a
+            // microtask, which is why the version that used
+            // `Promise::resolve` deadlocked.
+            yield_to_browser().await;
+        }
+    }
+    slots.into_iter().flatten().collect()
+}
+
+/// Hand control back to the browser's event loop.
+///
+/// A zero-delay `setTimeout`, not a resolved microtask. A microtask is drained
+/// before the browser returns to its event loop, so awaiting one from Rust does
+/// not let a pending `fetch` make progress; polling the twelve futures that way
+/// starves them and never terminates. A timer genuinely yields.
 async fn yield_to_browser() {
-    let _ = JsFuture::from(js_sys::Promise::resolve(&JsValue::NULL)).await;
+    let promise = js_sys::Promise::new(&mut |resolve: js_sys::Function, _reject: js_sys::Function| {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        // The promise's own `resolve` is a function, so it can be the timer
+        // callback directly. `setTimeout(..., 0)` defers to the next turn of
+        // the event loop, which is what makes this a yield rather than a no-op.
+        let callback: &js_sys::Function = resolve.as_ref();
+        let _ =
+            window.set_timeout_with_callback_and_timeout_and_arguments_0(callback, 0);
+    });
+    let _ = JsFuture::from(promise).await;
 }
 
 /// The stop-point URL for one line id.
