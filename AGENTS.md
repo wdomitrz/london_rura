@@ -247,6 +247,114 @@ Both schemes are `prefers-color-scheme` driven, dark first, and the accent is
 darkened to `#8a6d00` in the light scheme so it keeps its contrast against a
 white page.
 
+## The bug that four green builds did not catch
+
+**Read this before changing anything about how the app starts.** This app
+shipped four times with a green build, a green test run, a green CI job, all
+eight files present, and a page that did nothing. The user reported it as
+"stuck on Loading stations…", which was exactly right, and the cause was not
+the one that diagnosis suggested.
+
+### Why every check passed
+
+Because **nothing was running, so nothing could fail.**
+
+The entry point was marked `#[wasm_bindgen]`. That declares an ordinary
+*export*: `wasm-bindgen` puts the symbol in the wasm binary, and the generated
+glue does **not** re-export it. The glue's entire export list is:
+
+```js
+export { initSync, __wbg_init as default }
+```
+
+The shell's loader calls `m.default()`, which is the module's **initializer** —
+it instantiates the wasm and returns. The board's `start` is nowhere in that
+list and nothing else calls it. The page therefore:
+
+- loaded `index.html`, `app.js` and `app_bg.wasm` — all HTTP 200,
+- ran the loader, successfully, with no error,
+- drew its static shell, including the "Loading stations…" notice,
+- and then sat there forever, because the app's first line never executed.
+
+There is no error to log, no failed assertion, no missing file. A build that
+cannot fail cannot be caught by a test that checks the build.
+
+### The fix
+
+```rust
+#[wasm_bindgen(start)]   // not #[wasm_bindgen]
+```
+
+That attribute marks the function as the module's **start function**, which
+`wasm-bindgen` emits into the wasm's start section and the generated glue calls
+during initialisation — `wasm.__wbindgen_start();`, visible in `dist/app.js`.
+The reference implementation, `lego_mosaic`, uses this and only this; it is
+worth reading its `browser.rs` before writing another entry point.
+
+A start function is synchronous and cannot be awaited, so it does its wiring
+and hands the real work to `spawn_local`.
+
+### What now catches it
+
+- `the_board_declares_a_start_function` in `tests/shell.rs` asserts the
+  attribute is in the source, and that the start function hands async work to
+  `spawn_local` rather than trying to run it inline.
+- `the_loader_only_asks_for_the_initializer` asserts the loader does not reach
+  for an export that does not exist.
+- The CI site check asserts `dist/app.js` contains `__wbindgen_start` — the
+  property of the *built* artefact that no source-level test can see. This is
+  the one that matters: it checks what actually ships.
+
+All three are mutation-tested.
+
+### The second bug, hiding behind the first
+
+Once the app started, it **froze the renderer**. `load_stations` spawned twelve
+fetches with `spawn_local`, then polled a shared cell until every slot was
+filled, yielding between polls with a resolved `Promise` awaited from Rust.
+
+A microtask is drained *before* the browser returns to its event loop, so
+awaiting one does not let a pending `fetch` make progress. The polling loop
+starved the very tasks it was waiting for, forever — a hard hang, again with no
+error, and again invisible to every check that only inspects the build.
+
+It is now `join_all` over boxed futures: each turn polls every future and only
+yields when none is ready, and the yield is a real macrotask
+(`setTimeout(…, 0)`), which does hand control back to the event loop. That is
+also genuinely concurrent — the naive `for f in futures { f.await }` version
+would have compiled, passed every test, and serialised twelve requests into
+twelve round trips, which is the one thing the per-line fetch exists to avoid.
+
+**The lesson, and it generalises to every app in this family:** a board that
+renders a static shell and then stops is indistinguishable, to every automated
+check, from a board that works. Only loading the page and looking at it tells
+you. `tests/shell.rs` asserts the *properties* that made this possible; it
+cannot assert that the app renders, and nothing in the repository can.
+
+## Verifying by hand, in a real browser
+
+`cargo test` and CI do not catch any of the above. This is the loop that does,
+and it needs no browser automation:
+
+```bash
+cd dist && setsid python3 -m http.server 8099 &      # serve the built site
+chromium --headless --disable-gpu --no-sandbox          --virtual-time-budget=40000 --dump-dom http://127.0.0.1:8099/index.html
+```
+
+Then look at the DOM: the notice must have changed from "Loading stations…",
+and `<select id="station">` must hold more than one `<option>`. Two traps, both
+of which cost time here:
+
+- **`--virtual-time-budget` is a budget, not a timeout.** The app fetches from
+  the live network, so give it 30–60 s, and expect a rate limit after a handful
+  of runs. A rate limit shows the station-list failure notice, which is the app
+  behaving correctly — wait a minute and retry before believing it.
+- **`--dump-dom` is intermittently empty.** If it returns nothing, retry before
+  concluding the page is broken; the same command works on a re-run.
+
+A page that hangs the renderer produces no DOM at all, which is a distinct
+failure from a page that renders and shows an error — worth telling apart.
+
 ## Code map
 
 - `departures.rs`: the whole board, with no browser in it. The stop-point
@@ -256,11 +364,12 @@ white page.
   in the name, `floor(timeToStation / 60)`, the ten-per-platform cut, and the
   line-colour table with its `#666` default. Pure, and the unit tests at the
   bottom of the file drive all of it with fixture data.
-- `ui.rs`: wasm-only. The fetches to TfL — one per line, concurrent, parsed
-  from bytes — the DOM, the thirty-second refresh timer, the `?station=`
-  parameter, the page title, the connectivity notice and the service-worker
-  registration. Every question of *what* to show is answered by
-  `departures.rs`.
+- `ui.rs`: wasm-only. The fetches to TfL — one per line, joined concurrently,
+  parsed from bytes — the DOM, the thirty-second refresh timer, the
+  `?station=` parameter, the page title, the connectivity notice and the
+  service-worker registration. Every question of *what* to show is answered by
+  `departures.rs`. The entry point is `#[wasm_bindgen(start)]`; see above for
+  why that is not interchangeable with `#[wasm_bindgen]`.
 - `ui.html`: the static shell, copied to `dist/index.html` byte for byte. One
   inline `<style>`, one `<script type="module">`, and empty containers Rust
   fills.
