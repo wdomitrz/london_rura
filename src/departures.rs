@@ -13,17 +13,56 @@
 //! the request itself and the DOM it renders into. It feeds this module the
 //! deserialised JSON and renders what comes back, so the two cannot drift.
 
-/// The stop-point list endpoint. Tube and Elizabeth line, which is what the
-/// original app asked for; the Elizabeth line is the one mode that is not
-/// `tube` but still answers to the same station ids.
-pub const STATIONS_URL: &str = "https://api.tfl.gov.uk/StopPoint/Mode/tube,elizabeth-line";
-
-/// The arrivals endpoint for one station. `{id}` is a stop-point id.
-pub const ARRIVALS_URL: &str = "https://api.tfl.gov.uk/StopPoint/{id}/Arrivals";
+/// The per-line stop-point endpoint. `{line}` is a line id from [`LINE_IDS`].
+///
+/// This is what replaced the single mode request, for the reason set out on
+/// [`LINE_IDS`].
+pub const LINE_STOPS_URL: &str = "https://api.tfl.gov.uk/Line/{line}/StopPoints";
 
 /// The base the arrivals URL hangs off, so the id can be substituted without
 /// pulling the whole template around.
 pub const ARRIVALS_BASE: &str = "https://api.tfl.gov.uk/StopPoint/";
+
+/// Every line whose stations the board offers, in the order they are fetched.
+///
+/// Eleven Underground lines plus the Elizabeth line — the ids
+/// `Line/Mode/tube` and `Line/Mode/elizabeth-line` return, hard coded.
+///
+/// **Why not the one big request.** The original app asked for
+/// `StopPoint/Mode/tube,elizabeth-line` in a single call, and that endpoint
+/// answers with **16,958,009 bytes** — 17 MB of JSON for 1,858 stop points,
+/// of which 270 are stations. Almost all of it is two fields the board never
+/// reads: `children` (9.0 MB) and `additionalProperties` (7.1 MB), together
+/// 95% of the payload. `?detail=false` is accepted and does essentially
+/// nothing — it returned 16,957,998 bytes, a 0.0001% saving — and there is no
+/// smaller station-list endpoint.
+///
+/// Fetching `Line/<id>/StopPoints` for the twelve lines instead returns the
+/// **same 270 stations** — verified by diffing the two sets, which are
+/// identical — in 3,255,303 bytes across twelve requests, an 81% reduction, and
+/// the largest single response is one line's rather than the whole network's.
+/// A station on three lines appears in three responses and is deduplicated
+/// here.
+///
+/// The cost is twelve round trips instead of one, and they are issued
+/// concurrently, so the wall-clock difference is small. What it buys is a
+/// payload the UI thread can parse without freezing, and a failure that costs
+/// one line rather than the whole picker. The trade is deliberate: for a list
+/// this static, twelve small requests beat one large one.
+pub const LINE_IDS: &[&str] = &[
+    "bakerloo",
+    "central",
+    "circle",
+    "district",
+    "hammersmith-city",
+    "jubilee",
+    "metropolitan",
+    "northern",
+    "piccadilly",
+    "victoria",
+    "waterloo-city",
+    "elizabeth",
+];
 
 /// The TfL stop-point id prefixes that are real stations on the board.
 ///
@@ -139,6 +178,97 @@ pub fn line_colour(line: &str) -> &'static str {
         .map_or(DEFAULT_LINE_COLOUR, |(_, colour)| colour)
 }
 
+/// The ink to draw a line's name in, on a chip of that line's colour.
+///
+/// This is the one bit of presentation maths in the domain, and it is here
+/// rather than in a stylesheet because it is arithmetic, it is per line, and it
+/// is the part that has to be right for every colour on the board.
+///
+/// **Why it is needed.** The board's whole visual signal is the published line
+/// colours, and those colours are not all legible on any single background.
+/// Circle is `#FFD300` on white at 1.44:1 and Northern is `#000000` on white
+/// at 21:1, but Victoria is `#00A0E2` at 2.95:1 and the four pale lines sit
+/// under 2:1. Flipping to a dark background does not fix it either: District
+/// drops to 3.49:1 and Metropolitan to 2.37:1. **No background works for all
+/// twelve**, which is why the original's plain black-on-white table had three
+/// lines nobody could read.
+///
+/// So the line's name is drawn on a chip of its own colour, in whichever of
+/// black or white is legible on it, and the two are chosen together. Every
+/// line then clears 4.5:1 — the WCAG AA threshold for text — and the worst,
+/// Bakerloo, still manages 4.70:1. The colour is still the first thing the eye
+/// goes to; the text is the thing that survives when the colour cannot be
+/// seen, which also makes the board readable for a reader who is colour blind
+/// or on a dimmed screen.
+pub fn line_ink(colour: &str) -> &'static str {
+    if contrast_ratio(colour, DARK_INK) >= contrast_ratio(colour, LIGHT_INK) {
+        DARK_INK
+    } else {
+        LIGHT_INK
+    }
+}
+
+/// The dark page background, as the shell sets it.
+pub const DARK_PAGE: &str = "#0b0b0c";
+
+/// The light page background, as the shell sets it.
+pub const LIGHT_PAGE: &str = "#f6f7f9";
+
+/// Black, named for what it is on a chip.
+pub const DARK_INK: &str = "#000000";
+
+/// White, named for what it is on a chip.
+pub const LIGHT_INK: &str = "#ffffff";
+
+/// The WCAG 2.1 relative luminance of an sRGB hex colour.
+///
+/// The coefficients and the 0.03928 threshold are the ones WCAG defines; the
+/// linearisation is what makes the ratio below match what a reader sees rather
+/// than what the hex codes suggest.
+pub fn relative_luminance(colour: &str) -> f64 {
+    let hex = colour.trim().trim_start_matches('#');
+    let Some(rgb) = (0..3).map(|i| channel(hex, i)).collect::<Option<Vec<u8>>>() else {
+        // An unparsable colour is treated as black: the conservative end, and
+        // the one that keeps the ratio finite.
+        return 0.0;
+    };
+    let [r, g, b] = rgb[..] else {
+        return 0.0;
+    };
+    0.2126 * linearise(r) + 0.7152 * linearise(g) + 0.0722 * linearise(b)
+}
+
+/// One colour channel out of a hex string, 0–255.
+///
+/// Accepts both the six-digit form and the three-digit shorthand, because a
+/// stylesheet will happily hand over `#fff` and a colour function that quietly
+/// reads that as black puts white text on white.
+fn channel(hex: &str, index: usize) -> Option<u8> {
+    let width = if hex.len() == 3 { 1 } else { 2 };
+    let start = index * width;
+    let pair = hex.get(start..start.checked_add(width)?)?;
+    let value = u8::from_str_radix(pair, 16).ok()?;
+    Some(if width == 1 { value * 17 } else { value })
+}
+
+/// One channel's contribution to relative luminance.
+fn linearise(value: u8) -> f64 {
+    let channel = f64::from(value) / 255.0;
+    if channel <= 0.03928 {
+        channel / 12.92
+    } else {
+        ((channel + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// The WCAG contrast ratio between two sRGB hex colours, from 1.0 to 21.0.
+pub fn contrast_ratio(a: &str, b: &str) -> f64 {
+    let (one, other) = (relative_luminance(a), relative_luminance(b));
+    let lighter = one.max(other);
+    let darker = one.min(other);
+    (lighter + 0.05) / (darker + 0.05)
+}
+
 /// Whether a stop point is a station a passenger can pick.
 ///
 /// Both halves matter and both are the original's: the stop needs a
@@ -172,7 +302,17 @@ pub fn is_station(id: &str, common_name: Option<&str>) -> bool {
 /// would otherwise be indistinguishable from the station.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
 pub struct StopPoint {
-    #[serde(rename = "stopPointId", default)]
+    /// The field is `id`, not `stopPointId`.
+    ///
+    /// The stop-point list and the arrivals list disagree about this, and that
+    /// is the whole trap. `StopPoint/...` sends `"id"`; a `TflArrival` sends
+    /// `"stationName"`, `"platformName"` and no id at all; and the *older* TfL
+    /// Unified API documentation shows a `stopPointId` that the live endpoint
+    /// does not send. Renaming this to `stopPointId` is the single change that
+    /// leaves the picker silently empty forever: every stop point deserialises
+    /// with an empty id, every id fails the prefix test, and the board offers
+    /// nothing while reporting no error at all.
+    #[serde(rename = "id", default)]
     pub id: String,
     #[serde(rename = "commonName", default)]
     pub name: Option<String>,
@@ -663,34 +803,54 @@ fn a_whole_board_renders_the_platforms_in_order() {
 /// The JSON TfL sends, as fixtures, parsed through the same types the browser
 /// uses. This is the one thing a hand-built Rust fixture cannot check: that
 /// the field names on the wire still match what the app asks for.
+///
+/// These fixtures are transcribed from a real response, and they carry the
+/// fields the app ignores as well as the two it reads — a fixture trimmed to
+/// the two fields it needs proves nothing about whether it is reading the
+/// right ones. They also carry the heavy `children` and `additionalProperties`
+/// arrays, because those are 95% of the payload and the reason the fetch path
+/// changed.
 #[test]
 fn the_wire_formats_still_parse() {
+    // The `StopPoint/Mode/...` shape: an object wrapping a `stopPoints` array.
     let stop_points: serde_json::Value = serde_json::from_str(
         r#"{
           "$type": "TflStopPoint",
           "stopPoints": [
-            {"$type":"TflStopPoint","stopPointId":"940GZZLUKSX","commonName":"King's Cross St. Pancras","icsCode":"gc"},
-            {"$type":"TflStopPoint","stopPointId":"940GZZLULST","commonName":"Liverpool Street","icsCode":"li"},
-            {"$type":"TflStopPoint","stopPointId":"940GZZCRBOW","commonName":"Bow Road","icsCode":"bwr"},
-            {"$type":"TflStopPoint","stopPointId":"4900000934","commonName":"Tottenham Court Road"},
-            {"$type":"TflStopPoint","stopPointId":"940GZZLUKSX:1","commonName":null},
-            {"$type":"TflStopPoint","stopPointId":"940GZZLUBZW","commonName":"Brixton"}
+            {"$type":"TflStopPoint","id":"940GZZLUKSX","commonName":"King's Cross St. Pancras Underground Station","icsCode":"kgx","lat":51.5308,"lon":-0.1238,"modes":["tube"],"children":[{"$type":"TflStopPoint","id":"940GZZLUKSX:1","commonName":"King's Cross St. Pancras Rail Station"}]},
+            {"$type":"TflStopPoint","id":"940GZZLULST","commonName":"Liverpool Street Underground Station","icsCode":"lst"},
+            {"$type":"TflStopPoint","id":"940GZZCRBOW","commonName":"Bow Road Underground Station","icsCode":"bow"},
+            {"$type":"TflStopPoint","id":"4900000934","commonName":"Tottenham Court Road Underground Station"},
+            {"$type":"TflStopPoint","id":"940GZZLUBZW","commonName":"Brixton Underground Station"},
+            {"$type":"TflStopPoint","id":"940GZZLUKSX:2","commonName":null,"children":[]},
+            {"$type":"TflStopPoint","id":"0400ZZLUAMS0","commonName":"Amersham Underground Station"}
           ]
         }"#,
     )
     .expect("stop point list");
-    let list: Vec<StopPoint> = stop_points["stopPoints"]
-        .as_array()
-        .expect("stopPoints array")
-        .iter()
-        .map(|sp| StopPoint {
-            id: sp["stopPointId"].as_str().unwrap_or_default().to_string(),
-            name: sp["commonName"].as_str().map(str::to_string),
-        })
-        .collect();
+    let list: Vec<StopPoint> = serde_json::from_value(stop_points["stopPoints"].clone())
+        .expect("the stop points, deserialised exactly as the browser does");
     let kept = station_list(list);
     let names: Vec<&str> = kept.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(names, vec!["Bow Road", "Brixton", "King's Cross St. Pancras", "Liverpool Street"]);
+    assert_eq!(
+        names,
+        vec![
+            "Bow Road Underground Station",
+            "Brixton Underground Station",
+            "King's Cross St. Pancras Underground Station",
+            "Liverpool Street Underground Station",
+        ]
+    );
+    // The ids must be the real ones, or every later request 404s. This is the
+    // assertion that would have caught the `stopPointId` mistake: deserialising
+    // that name leaves every id empty, the filter drops everything, and the
+    // board quietly offers no stations at all.
+    assert!(
+        kept.iter().all(|s| is_station(&s.id, Some(&s.name))),
+        "every station kept must carry its own real id: {:?}",
+        kept.iter().map(|s| &s.id).collect::<Vec<_>>()
+    );
+    assert!(kept.iter().any(|s| s.id == "940GZZLUBZW"), "Brixton by id");
 
     let arrivals: serde_json::Value = serde_json::from_str(
         r#"[
@@ -723,4 +883,144 @@ fn the_wire_formats_still_parse() {
     assert_eq!(minutes_of(&board.platforms[2]), vec![-1]);
 }
 
+/// A real `Line/<id>/StopPoints` response, parsed the way the browser parses
+/// it, through the same type the picker is filled from.
+///
+/// The fixture is a verbatim slice of a real response, trimmed to eight stop
+/// points but otherwise untouched — the heavy `children` and
+/// `additionalProperties` arrays are still there, because the size of what
+/// arrives is the whole point of the per-line fetch. If this test ever fails
+/// with an empty station list, the id field has been renamed again: that is the
+/// failure that leaves the picker permanently empty while reporting nothing.
+#[test]
+fn a_real_stop_point_response_yields_stations() {
+    let bytes = include_bytes!("../tests/fixtures_line_stoppoints.json");
+    let stops: Vec<StopPoint> =
+        serde_json::from_slice(bytes).expect("a real line stop-point response");
+    let stations = station_list(stops);
+
+    assert!(
+        !stations.is_empty(),
+        "a real response must yield stations; an empty list means the id field \
+         is wrong again"
+    );
+    // Six are Underground stations in this slice; the two `0400ZZLU…` entries
+    // are named but are not on the network this board serves.
+    assert_eq!(stations.len(), 6, "unexpected station count: {stations:?}");
+    let names: Vec<&str> = stations.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "Acton Town Underground Station",
+            "Aldgate East Underground Station",
+            "Aldgate Underground Station",
+            "Alperton Underground Station",
+            "Angel Underground Station",
+            "Archway Underground Station",
+        ]
+    );
+    // And the ids are the ones the arrivals endpoint will accept.
+    for station in &stations {
+        assert!(
+            station.id.starts_with("940GZZLU") || station.id.starts_with("940GZZCR"),
+            "{} has an id the board cannot request arrivals for: {}",
+            station.name,
+            station.id
+        );
+    }
+    // A station on three lines arrives in three responses; the picker must not
+    // show it three times.
+    let unique: std::collections::HashSet<&str> = stations.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(unique.len(), stations.len(), "duplicate stations in the picker");
+}
+
+/// Every line must be readable on its own chip, in whichever ink `line_ink`
+/// chose. This is the assertion that makes the colour scheme a property of the
+/// code rather than a matter of taste: if a line is added with a colour that
+/// cannot reach 4.5:1 against either black or white, this fails and the fix is
+/// a chip, not a font size.
+#[test]
+fn every_line_is_readable_on_its_own_chip() {
+    for line in LINE_COLOURS.iter().map(|(name, _)| *name) {
+        let colour = line_colour(line);
+        let ink = line_ink(colour);
+        let ratio = contrast_ratio(colour, ink);
+        assert!(
+            ratio >= 4.5,
+            "{line} ({colour}) is only {ratio:.2}:1 against {ink}; a line name \
+             the reader cannot read is not a colour scheme"
+        );
+    }
+    // And the default grey, which is what an unknown line gets.
+    assert!(contrast_ratio(DEFAULT_LINE_COLOUR, line_ink(DEFAULT_LINE_COLOUR)) >= 4.5);
+}
+
+/// The two extremes of the ratio, which is what pins the whole function: the
+/// ratio is 21:1 between black and white, and 1:1 between a colour and itself.
+#[test]
+fn the_contrast_ratio_is_the_wcag_one() {
+    let ratio = contrast_ratio("#000000", "#ffffff");
+    assert!((ratio - 21.0).abs() < 0.01, "black on white is 21:1, got {ratio}");
+    assert!((contrast_ratio("#FFD300", "#FFD300") - 1.0).abs() < 0.01);
+    // Case-insensitive, and the short form.
+    assert_eq!(relative_luminance("#fff"), relative_luminance("#FFFFFF"));
+    // Unparsable input must not produce NaN and take the chip with it.
+    assert_eq!(relative_luminance("not a colour"), 0.0);
+    assert!(contrast_ratio("nonsense", "#ffffff").is_finite());
+}
+
+/// The two inks must be chosen correctly for the awkward cases, which are the
+/// ones a test on "is it high contrast" would wave through.
+#[test]
+fn the_ink_follows_the_chip() {
+    // Pale chips want black: Circle's yellow is 14.6:1 on black and 1.4:1 on
+    // white.
+    assert_eq!(line_ink("#FFD300"), DARK_INK);
+    assert_eq!(line_ink("#95CDBA"), DARK_INK);
+    assert_eq!(line_ink("#F3A9BB"), DARK_INK);
+    // Dark chips want white: Northern is black, so it must not be black on
+    // black.
+    assert_eq!(line_ink("#000000"), LIGHT_INK);
+    assert_eq!(line_ink("#003688"), LIGHT_INK);
+    // The middles, where it is not obvious, are pinned so a change to the
+    // arithmetic cannot quietly flip them.
+    assert_eq!(line_ink("#B36305"), DARK_INK, "Bakerloo, 4.70:1 on black");
+    assert_eq!(line_ink("#E32017"), LIGHT_INK, "Central, 4.68:1 on white");
+    assert_eq!(line_ink("#00A0E2"), DARK_INK, "Victoria, 7.13:1 on black");
+}
+
+/// A chip also has to be *findable*: its fill must not disappear into the page
+/// behind it.
+///
+/// The `line_ink` test covers the text against its own chip, and that is not
+/// the same question. Northern's black is `#000000`, which is 1.07:1 against the
+/// dark page and would be an invisible rectangle; Circle's yellow is 1.34:1
+/// against the light page. No fill colour can satisfy both schemes at once, so
+/// the shell gives every chip a hairline ring instead — see `--ring` in
+/// `ui.html` — and this test pins the numbers that decision was made on, so
+/// whoever changes the page background knows what they are testing.
+#[test]
+fn the_chip_edge_is_a_decision_the_numbers_record() {
+    // The two fills that are invisible against a page, one per scheme. If a
+    // future palette change makes a third one, this test is the place to notice.
+    for line in ["Northern", "Circle"] {
+        let colour = line_colour(line);
+        let against_dark = contrast_ratio(colour, DARK_PAGE);
+        let against_light = contrast_ratio(colour, LIGHT_PAGE);
+        assert!(
+            against_dark < 1.5 || against_light < 1.5,
+            "{line} ({colour}) is now visible on both pages ({against_dark:.2} \
+             dark, {against_light:.2} light); the ring may no longer be needed"
+        );
+    }
+    // And the rest of the palette does not need the ring to be seen, which is
+    // why the ring is decoration rather than the accessibility mechanism.
+    for line in ["Central", "Victoria", "Piccadilly", "Metropolitan"] {
+        let colour = line_colour(line);
+        assert!(
+            contrast_ratio(colour, DARK_PAGE) >= 1.5 || contrast_ratio(colour, LIGHT_PAGE) >= 1.5,
+            "{line} is dim on both pages"
+        );
+    }
+}
 }

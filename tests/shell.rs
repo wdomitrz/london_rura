@@ -117,6 +117,23 @@ fn the_shell_is_labelled_live_and_legible_without_colour() {
         page.contains("prefers-reduced-motion"),
         "reduced motion is respected"
     );
+    // The line chips carry a hairline ring, because two of the published line
+    // colours are all but invisible against the page behind them: Northern's
+    // black is 1.07:1 on the dark page and Circle's yellow is 1.34:1 on the
+    // light one. The ring gives every chip a defined edge without touching the
+    // colour the reader is meant to be identifying. See `the_chip_edge_is_a_
+    // decision_the_numbers_record` in src/departures.rs.
+    assert!(
+        page.contains("--ring"),
+        "chips need an edge, or a line's own colour disappears into the page"
+    );
+    assert!(
+        page.contains("span[data-line]"),
+        "the chip styles must target the element that carries the attribute"
+    );
+    // The board's one accent, for the minutes, and the "arriving now" mark.
+    assert!(page.contains("--accent"), "the minutes need an accent colour");
+    assert!(page.contains("td.due"), "arriving now must be distinguishable");
     assert!(
         page.contains("<noscript>"),
         "the page must say what it needs"
