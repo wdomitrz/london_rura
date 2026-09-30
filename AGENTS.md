@@ -203,6 +203,34 @@ line's stations are mostly reached through the `940GZZCR`/`940GZZLU` ids for the
 interchanges that carry it. Keeping the two prefixes unchanged is the
 faithful port; widening them would be a redesign.
 
+## User-visible text never names the implementation
+
+No string a reader can see may contain "Rust", "WebAssembly", "wasm",
+"JavaScript", "bindings" or "compile" — not in the shell's rendered text, and
+not in a string `ui.rs` writes into the DOM. A reader told a failure happened
+"in Rust" has been told something they cannot act on and did not ask for; what
+they need is the app's name and what to do next. So the loader's message is
+"London Rura could not start. Reload the page or check your connection."
+
+The line is the **interface**, not the codebase. This file, `README.md` and
+every source comment may and do say "Rust" in as much detail as they like;
+`tests/shell.rs` deliberately does not read them. It reads the rendered
+markup, the literals the loader writes, and the `const … : &str` messages in
+`ui.rs`, and fails on any of them.
+
+Two things are deliberately still allowed:
+
+- **A fact about the service.** "Departures come live from the TfL API" tells
+  the reader why a time might be stale, which is exactly what a board should
+  say. It names no implementation.
+- **The `<noscript>` notice**, which is the one place "JavaScript" survives.
+  Its only reader is someone whose scripting is switched off, so "this needs
+  JavaScript to run" is the true and actionable explanation of the failure the
+  notice exists to describe: the scripting did not run. It names a browser
+  setting the reader controls, and no application implementation. The test
+  treats it as the single exception and bans the word everywhere else,
+  including in `ui.rs`.
+
 ## Tests
 
 `src/departures.rs` carries the unit tests, inline, and they are the valuable
@@ -216,7 +244,8 @@ parses the JSON shapes TfL actually sends, because a fixture built in Rust
 cannot catch a field renamed upstream.
 
 `tests/shell.rs` asserts the invariants of the committed shell and of what is
-committed: the page loads the generated bindings and not a manual wasm ABI,
+committed: no user-visible string names the implementation (see above), the page
+loads the generated bindings and not a manual wasm ABI,
 there is exactly one `<script>`, no absolute URL and no `fetch(` in the shell,
 the ids the board looks up exist, the worker has exactly one `__VERSION__` and
 no skip-waiting call, the worker caches exactly the eight site files and does

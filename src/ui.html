@@ -92,11 +92,11 @@ td:last-child, th:last-child { text-align: right; font-variant-numeric: tabular-
   <div id="departures" aria-live="polite" aria-busy="false"></div>
 </main>
 
-<noscript>This board needs JavaScript enabled to load the Rust WebAssembly application. Departures come from the live TfL API.</noscript>
+<noscript>This board needs JavaScript to run. Departures come live from the TfL API and are shown here; without JavaScript there is nothing to show.</noscript>
 <!-- The only JavaScript in this app: a dynamic import of the generated
      bindings, and a message if that fails. Everything else is Rust. -->
 <script type="module">
-import('./app.js').then(m => m.default()).catch(error => { document.getElementById('notice').textContent = 'London Rura could not start.'; const box = document.getElementById('departures'); box.textContent = 'Could not load the Rust board. Reload the page or check your connection. ' + error; });
+import('./app.js').then(m => m.default()).catch(error => { document.getElementById('notice').textContent = 'London Rura could not start.'; const box = document.getElementById('departures'); box.textContent = 'London Rura could not start. Reload the page or check your connection. ' + error; });
 </script>
 </body>
 </html>

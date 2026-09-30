@@ -225,6 +225,238 @@ fn the_service_worker_does_not_cache_or_intercept_the_tfl_api() {
     );
 }
 
+/// No user-visible text may name the implementation.
+///
+/// A reader who is told a failure happened "in Rust", or that the page needs
+/// "WebAssembly", has been told something they cannot act on and did not ask
+/// for. What they need to know is what the app is called and what to do next.
+///
+/// The line is the *interface*, not the codebase: `AGENTS.md`, `README.md` and
+/// every source comment here may and do say "Rust" in as much detail as they
+/// like, and this test deliberately does not read them. What it checks is the
+/// strings a person can see — the markup that is rendered, and the literals
+/// `ui.rs` writes into the DOM.
+///
+/// What is still allowed is a fact about the *service*. "Departures come live
+/// from the TfL API" tells the reader why a time might be stale, which is
+/// exactly the kind of thing a board should say, and names no implementation.
+#[test]
+fn no_user_visible_text_names_the_implementation() {
+    const BANNED: &[&str] = &[
+        "rust",
+        "webassembly",
+        "wasm",
+        "bindings",
+        "compile",
+        "compiler",
+    ];
+    /// Banned everywhere except the `<noscript>` notice, and only there because
+    /// its reader is the one person for whom "this needs JavaScript to run" is
+    /// the true and actionable explanation. See `strip_non_rendered`.
+    const BANNED_EXCEPT_NOSCRIPT: &[&str] = &["javascript"];
+
+    // The rendered parts of the shell: text nodes, and the message the loader
+    // writes into the page. Comments, `<style>` and `<script>` bodies are
+    // stripped first, because they are for the next person to read, not the
+    // reader. The `<noscript>` notice is the one deliberate exception; see
+    // `strip_non_rendered`.
+    let page = shell();
+    let visible = strip_non_rendered(&page);
+    for word in BANNED {
+        assert!(
+            !contains_word(&visible, word),
+            "the page shows the word {word:?} to a reader; it must not name the \
+             implementation.\n--- visible text ---\n{visible}"
+        );
+    }
+
+    // `javascript` is banned everywhere except the `<noscript>` notice, so the
+    // notice is removed and the rest checked on its own.
+    let without_noscript = strip_noscript(&visible);
+    for word in BANNED_EXCEPT_NOSCRIPT {
+        assert!(
+            !contains_word(&without_noscript, word),
+            "the page shows the word {word:?} to a reader outside the \
+             <noscript> notice.\n--- visible text ---\n{without_noscript}"
+        );
+    }
+
+    // Every string literal `ui.rs` can put on screen.
+    let source = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui.rs"),
+    )
+    .expect("the browser layer");
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        // Only `const NAME: &str = "..."` is a user-visible message. Anything
+        // else with a string in it is a URL, a query-parameter name, or a
+        // format string, none of which is prose a reader ever sees.
+        let Some(rest) = trimmed.strip_prefix("const ") else {
+            continue;
+        };
+        if !rest.contains(": &str = \"") {
+            continue;
+        }
+        // `javascript` is banned here without exception: the <noscript> notice
+        // is in the shell, and nothing this file writes into the DOM is shown to
+        // a reader whose scripting is off.
+        for word in BANNED.iter().chain(BANNED_EXCEPT_NOSCRIPT) {
+            assert!(
+                !contains_word(rest, word),
+                "a user-visible message names the implementation ({word:?}): {trimmed}"
+            );
+        }
+    }
+}
+
+/// Strip the parts of the HTML a reader never sees: comments, `<style>`,
+/// `<script>`, and the tags themselves, leaving the text that is rendered.
+///
+/// The loader's `catch` handler *does* write to the page, so `<script>` is not
+/// simply dropped — its string literals are kept, and the code around them
+/// removed, which is enough to see whether the message names the
+/// implementation.
+fn strip_non_rendered(page: &str) -> String {
+    let mut out = String::with_capacity(page.len());
+    let mut rest = page;
+    loop {
+        let Some(at) = rest.find('<') else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        // Comments and style blocks go entirely.
+        if let Some(after) = rest.strip_prefix("<!--") {
+            rest = after.split_once("-->").map_or("", |(_, r)| r);
+            continue;
+        }
+        if rest.starts_with("<style") {
+            rest = rest
+                .split_once('>')
+                .and_then(|(_, r)| r.split_once("</style>"))
+                .map_or("", |(_, r)| r);
+            continue;
+        }
+        // `<noscript>` is kept, and that is the one deliberate exception. Its
+        // text only ever reaches someone whose JavaScript is switched off, so
+        // "this needs JavaScript to run" is the one true and actionable thing
+        // it can tell them — the failure the notice exists to explain is
+        // precisely that the scripting did not run. It names no application
+        // implementation, only the browser setting the reader controls. The
+        // rest of the app says nothing of the kind; see the test above.
+        if rest.starts_with("<noscript") {
+            let Some(close) = rest.find('>') else {
+                break;
+            };
+            let after = &rest[close + 1..];
+            if let Some((body, tail)) = after.split_once("</noscript>") {
+                out.push(' ');
+                out.push_str(NOSCRIPT_OPEN);
+                out.push_str(body);
+                out.push_str(NOSCRIPT_CLOSE);
+                out.push(' ');
+                rest = tail;
+                continue;
+            }
+        }
+        // A tag: keep the quoted literals out of a <script>, drop the tag.
+        let Some(close) = rest.find('>') else {
+            out.push_str(rest);
+            break;
+        };
+        let tag = &rest[..=close];
+        if tag.starts_with("<script") {
+            for literal in quoted(tag) {
+                out.push(' ');
+                out.push_str(&literal);
+                out.push(' ');
+            }
+        }
+        rest = &rest[close + 1..];
+    }
+    out
+}
+
+/// Delimiters wrapped around the `<noscript>` body so the notice can be
+/// recognised again, and taken back out, after the fact.
+const NOSCRIPT_OPEN: &str = "\u{1}noscript\u{2}";
+const NOSCRIPT_CLOSE: &str = "\u{2}\u{1}";
+
+/// Remove the `<noscript>` notice from already-extracted visible text.
+fn strip_noscript(visible: &str) -> String {
+    let mut out = String::with_capacity(visible.len());
+    let mut rest = visible;
+    while let Some(start) = rest.find(NOSCRIPT_OPEN) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + NOSCRIPT_OPEN.len()..];
+        match after.find(NOSCRIPT_CLOSE) {
+            Some(end) => rest = &after[end + NOSCRIPT_CLOSE.len()..],
+            None => {
+                rest = after;
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The double-quoted string literals in a fragment of HTML or JavaScript.
+fn quoted(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            continue;
+        }
+        let mut literal = String::new();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => break,
+                // An escaped quote ends the literal only if it is not itself
+                // escaped; keeping it simple is fine here, because the strings
+                // this reads are the app's own prose.
+                '\\' => {
+                    if let Some(escaped) = chars.next() {
+                        literal.push(escaped);
+                    }
+                }
+                _ => literal.push(c),
+            }
+        }
+        out.push(literal);
+    }
+    out
+}
+
+/// Whether `haystack` contains `word` as a word, not as part of another one.
+///
+/// Word-bounded so that `rust` does not fire on `trusted` and `wasm` does not
+/// fire on `wasmbounded`; a check loose enough to trip on those gets deleted
+/// by the first person it annoys, and then stops protecting anything.
+fn contains_word(haystack: &str, word: &str) -> bool {
+    let haystack = haystack.to_lowercase();
+    let mut at = 0;
+    while let Some(found) = haystack[at..].find(word) {
+        let start = at + found;
+        let end = start + word.len();
+        let before_ok = haystack[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        let after_ok = haystack[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        at = end;
+    }
+    false
+}
+
 /// Nothing generated may be tracked — not the wasm, not the bindings, not the
 /// site, and not the install PNGs. This is the test that would have caught any
 /// of them being committed.
