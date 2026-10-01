@@ -815,6 +815,21 @@ struct TflArrival {
     line_name: Option<String>,
     #[serde(rename = "destinationName", default)]
     destination_name: Option<String>,
+    /// Where the service is told to go when it has no destination name.
+    ///
+    /// **This is not a substitute for `destinationName`; it is what TfL puts
+    /// there instead, and it is better than a dash.** A Hammersmith & City
+    /// service at King's Cross arrives with an empty `destinationName` and
+    /// `towards: "Check Front of Train"` — a working notice for the crew, not a
+    /// passenger-facing destination. Shown as a dash it read as a row whose data
+    /// was missing; shown as itself it is the thing TfL actually says, and a
+    /// reader standing on that platform needs it.
+    ///
+    /// It is only a fallback, and only when it says something: TfL also sends
+    /// `towards` on ordinary services, where it duplicates the destination, and
+    /// a duplicate would be worse than neither.
+    #[serde(rename = "towards", default)]
+    towards: Option<String>,
     #[serde(rename = "timeToStation", default)]
     time_to_station: Option<i32>,
     #[serde(rename = "platformName", default)]
@@ -833,13 +848,41 @@ struct TflArrival {
 impl From<TflArrival> for Arrival {
     fn from(arrival: TflArrival) -> Self {
         Self {
-            line_name: arrival.line_name.unwrap_or_default(),
-            destination: arrival.destination_name.unwrap_or_default(),
+            line_name: arrival.line_name.clone().unwrap_or_default(),
+            destination: destination_of(&arrival),
             time_to_station: arrival.time_to_station,
-            platform: arrival.platform_name,
+            platform: arrival.platform_name.clone(),
             mode: arrival.mode_name.as_deref().and_then(Mode::from_api_name),
         }
     }
+}
+
+/// What to show in a row's destination cell.
+///
+/// `destinationName` when there is one, then `towards` when that says something
+/// the name did not, and an empty string when neither does — which the renderer
+/// draws as a dash.
+///
+/// The middle step is the one that matters. TfL sends an empty
+/// `destinationName` on a handful of services and puts the real instruction in
+/// `towards` instead; at King's Cross that is `"Check Front of Train"` on the
+/// Hammersmith & City rows. A dash there said "no destination given" when TfL
+/// had given one, on exactly the platform where a reader most needs it.
+fn destination_of(arrival: &TflArrival) -> String {
+    let named = arrival
+        .destination_name
+        .as_deref()
+        .unwrap_or_default()
+        .trim();
+    if !named.is_empty() {
+        return named.to_string();
+    }
+    arrival
+        .towards
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 /// Fetch a URL as raw bytes, or an error a reader can be told about.
@@ -1547,16 +1590,28 @@ fn paint(app: &Shared, board: &Board) {
 
     // Platforms are already sorted by platform number then mode, so the modes
     // arrive in contiguous runs and one pass groups them.
-    let mut groups: Vec<(Option<Mode>, &Platform)> = Vec::new();
+    // Split the platform list into runs of consecutive platforms sharing a
+    // mode. Every platform is kept — a run is a *heading*, not a container, so
+    // one Underground platform and the next Underground platform are two runs
+    // of one platform each and both are drawn.
+    //
+    // **This is what the board got wrong.** Collapsing a run to its first
+    // platform drew one table per mode, so King's Cross — which has eight
+    // platforms, all of them the Underground — showed only Platform 1 and the
+    // other seven were silently absent. The domain had grouped them correctly
+    // all along; the renderer threw seven of them away.
+    let mut runs: Vec<(Option<Mode>, Vec<&Platform>)> = Vec::new();
     for platform in &board.platforms {
-        match groups.last_mut() {
-            Some((mode, _)) if *mode == platform.mode => {}
-            _ => groups.push((platform.mode, platform)),
+        match runs.last_mut() {
+            Some((mode, members)) if *mode == platform.mode => members.push(platform),
+            _ => runs.push((platform.mode, vec![platform])),
         }
     }
     // A mode heading earns its place only when the board holds more than one
     // mode: for a station with a single mode it labels the one thing the reader
-    // can already see.
+    // can already see, and at King's Cross — eight platforms, one mode — a
+    // heading reading "Underground" above each of them would be eight labels
+    // for the same fact.
     let several_modes = board
         .platforms
         .iter()
@@ -1578,7 +1633,9 @@ fn paint(app: &Shared, board: &Board) {
     columns.append_child(&head).expect("head");
     root.append_child(&columns).expect("column header");
 
-    for (mode, platform) in groups {
+    for (mode, members) in runs {
+        // The mode heading, once per run of same-mode platforms, on that mode's
+        // own colour, and only when the board holds more than one mode.
         if several_modes {
             if let Some(mode) = mode {
                 let title = heading(root, 3, &mode.label());
@@ -1591,83 +1648,83 @@ fn paint(app: &Shared, board: &Board) {
             }
         }
 
-        // The platform name goes in the heading only when there is more than one
-        // to tell apart. "Platform 1" as a heading above "Platform 1" is a label
-        // for nothing, and a board that spends 24px on it has 24px fewer for
-        // trains. With a mode heading above it, the platform level drops to an
-        // h4 so the document outline still runs in order.
-        if board.platforms.len() > 1 {
-            heading(root, 4, &platform.name);
-        }
-        let table = element_of(root, "table");
-        let body = element_of(root, "tbody");
-        for departure in &platform.departures {
-            let row = element_of(root, "tr");
+        // Every platform in the run gets its own heading and its own table.
+        // This loop is the fix: the previous one iterated the runs themselves,
+        // so a run of eight Underground platforms produced one table.
+        for platform in members {
+            // The platform name goes in the heading only when there is more than one
+            // to tell apart. "Platform 1" as a heading above "Platform 1" is a label
+            // for nothing, and a board that spends 24px on it has 24px fewer for
+            // trains. With a mode heading above it, the platform level drops to an
+            // h4 so the document outline still runs in order.
+            if board.platforms.len() > 1 {
+                heading(root, 4, &platform.name);
+            }
+            let table = element_of(root, "table");
+            let body = element_of(root, "tbody");
+            for departure in &platform.departures {
+                let row = element_of(root, "tr");
 
-            // The line's name on a chip of the line's own published colour, in
-            // whichever of black or white is legible on it. When the line has no
-            // colour of its own — every bus route, every river service — the
-            // mode's colour stands in, so a mode is never a row of grey. The
-            // colour and the ink are set as custom properties and the stylesheet
-            // consumes them, so no colour is written in two places and the chip
-            // picks up the shape and the ring from one rule.
-            let colour = departure_colour(&departure.line, departure.mode);
-            let line_cell = element_of(root, "td");
-            let chip = element_of(root, "span");
-            let _ = chip.set_attribute("class", "chip");
-            let _ = chip.set_attribute(
-                "style",
-                &format!("--chip: {colour}; --chip-ink: {};", line_ink(colour)),
-            );
-            // The name is text on the chip, not the chip's colour: the board is
-            // readable when the colour cannot be seen.
-            let _ = chip.set_attribute("data-line", &departure.line);
-            chip.set_text_content(Some(&departure.line));
-            line_cell.append_child(&chip).expect("line chip");
-            row.append_child(&line_cell).expect("line cell");
+                // The line's name on a chip of the line's own published colour, in
+                // whichever of black or white is legible on it. When the line has no
+                // colour of its own — every bus route, every river service — the
+                // mode's colour stands in, so a mode is never a row of grey. The
+                // colour and the ink are set as custom properties and the stylesheet
+                // consumes them, so no colour is written in two places and the chip
+                // picks up the shape and the ring from one rule.
+                let colour = departure_colour(&departure.line, departure.mode);
+                let line_cell = element_of(root, "td");
+                let chip = element_of(root, "span");
+                let _ = chip.set_attribute("class", "chip");
+                let _ = chip.set_attribute(
+                    "style",
+                    &format!("--chip: {colour}; --chip-ink: {};", line_ink(colour)),
+                );
+                // The name is text on the chip, not the chip's colour: the board is
+                // readable when the colour cannot be seen.
+                let _ = chip.set_attribute("data-line", &departure.line);
+                chip.set_text_content(Some(&departure.line));
+                line_cell.append_child(&chip).expect("line chip");
+                row.append_child(&line_cell).expect("line cell");
 
-            // TfL sends an empty `destinationName` for some services. A blank
-            // cell reads as a rendering failure; a dash reads as "no destination
-            // given", which is what it is.
-            let destination = cell(
-                &row,
-                if departure.destination.trim().is_empty() {
-                    NO_DESTINATION
-                } else {
-                    &departure.destination
-                },
-                "td",
-            );
-            let _ = destination.set_attribute("class", "destination");
+                // TfL sends an empty `destinationName` for some services. A blank
+                // cell reads as a rendering failure; a dash reads as "no destination
+                // given", which is what it is.
+                let destination = cell(
+                    &row,
+                    if departure.destination.trim().is_empty() {
+                        NO_DESTINATION
+                    } else {
+                        &departure.destination
+                    },
+                    "td",
+                );
+                let _ = destination.set_attribute("class", "destination");
 
-            // Zero or fewer minutes means the train is at the platform, which is
-            // not the same as "no time" — it is the thing the reader is waiting
-            // for, so it gets its own colour rather than reading as a blank.
-            let due = departure.minutes <= 0;
-            let minutes = cell(
-                &row,
-                &if due {
-                    if departure.minutes == 0 {
-                        "due".to_string()
+                // Zero or fewer minutes means the train is at the platform, which is
+                // not the same as "no time" — it is the thing the reader is waiting
+                // for, so it gets its own colour rather than reading as a blank.
+                let due = departure.minutes <= 0;
+                let minutes = cell(
+                    &row,
+                    &if due {
+                        if departure.minutes == 0 {
+                            "due".to_string()
+                        } else {
+                            departure.minutes.to_string()
+                        }
                     } else {
                         departure.minutes.to_string()
-                    }
-                } else {
-                    departure.minutes.to_string()
-                },
-                "td",
-            );
-            let _ = minutes.set_attribute("class", if due { "minutes due" } else { "minutes" });
-            body.append_child(&row).expect("row");
+                    },
+                    "td",
+                );
+                let _ = minutes.set_attribute("class", if due { "minutes due" } else { "minutes" });
+                body.append_child(&row).expect("row");
+            }
+            table.append_child(&body).expect("body");
+            root.append_child(&table).expect("table");
         }
-        table.append_child(&body).expect("body");
-        root.append_child(&table).expect("table");
     }
-
-    // If a mode on this station is switched off, say so rather than leaving the
-    // reader to wonder whether the services they cannot see were cancelled. The
-    // board is filtered by the caller, so the caller passes whether anything
-    // was hidden.
 }
 
 /// Empty an element of its children, without `innerHTML`.
