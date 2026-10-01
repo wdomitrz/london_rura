@@ -277,25 +277,91 @@ impl ModeSet {
     pub fn intersects(self, other: Self) -> bool {
         self.0 & other.0 != 0
     }
-
 }
 
 /// A mode's bit position, from its order in [`MODES`].
 ///
-/// Eight modes, so a `u16` holds the whole set and the position is a match
+/// Nine modes, so a `u16` holds the whole set and the position is a match
 /// rather than an index lookup — an index would panic if [`MODES`] and the
 /// match ever disagreed, which is exactly the kind of quiet coupling that
 /// renumbers a bitmask without anyone noticing.
+///
+/// **The match has to cover every mode with its own bit, and it did not.**
+/// `NationalRail` returned `4`, the same bit as `Bus`, so the two switches were
+/// one switch: switching buses on also switched national rail on, and switching
+/// either off switched both off. The modes list is nine long and a `u16` holds
+/// sixteen bits, so there was never a reason to reuse one.
+///
+/// The consequence was not a visible crash. It was that `ModeSet::all()` and
+/// `ModeSet::default_on()` built a set that could not be told apart from one with
+/// the two modes conflated, a URL written from it named only one of them, and a
+/// station served by national rail but not by buses was filtered out as though
+/// it were served by neither. `every_mode_has_its_own_bit` is what keeps it
+/// fixed.
 fn mode_index(mode: Mode) -> u32 {
     match mode {
         Mode::Tube => 0,
         Mode::Elizabeth => 1,
         Mode::Overground => 2,
         Mode::Dlr => 3,
-        Mode::Bus => 4,
-        Mode::Cable => 5,
-        Mode::Cycle => 6,
-        Mode::River => 7,
         Mode::NationalRail => 4,
+        Mode::Bus => 5,
+        Mode::Cable => 6,
+        Mode::Cycle => 7,
+        Mode::River => 8,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every mode gets its own bit, and no two modes are conflated.
+    ///
+    /// This is the invariant the bus/national-rail collision broke. If two modes
+    /// shared a bit then switching one on switched the other, a station served
+    /// by one but not the other was filtered out as served by neither, and no
+    /// assertion above — api name, label, colour, glyph — would have noticed:
+    /// they all read from [`Mode`] itself, not from the bit it lands on.
+    #[test]
+    fn every_mode_has_its_own_bit() {
+        let mut seen: Vec<u32> = MODES.iter().map(|mode| mode_index(*mode)).collect();
+        let total = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            total,
+            "two modes share a bit, so their switches are one switch"
+        );
+        // And the bits fit the u16 the set is built from.
+        for mode in MODES {
+            assert!(mode_index(*mode) < 16, "{mode:?} is outside the mask");
+        }
+    }
+
+    /// Switching one mode on leaves every other mode exactly as it was.
+    ///
+    /// The behavioural statement of the same invariant: a set is per-mode, so
+    /// building one mode's set cannot be read back as another's. Buses and
+    /// national rail were the pair this failed for.
+    #[test]
+    fn a_single_mode_set_is_distinct_from_every_other() {
+        for a in MODES {
+            for b in MODES {
+                let mut set = ModeSet::empty();
+                set.insert(*a);
+                let contains_a = set.contains(*a);
+                let contains_b = set.contains(*b);
+                if a == b {
+                    assert!(contains_a && contains_b, "{a:?} should be on");
+                } else {
+                    assert!(
+                        !(contains_a && contains_b),
+                        "{a:?} and {b:?} cannot both be one set"
+                    );
+                }
+            }
+        }
     }
 }

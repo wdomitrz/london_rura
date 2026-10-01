@@ -32,9 +32,9 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{Document, Element, HtmlInputElement, Location, Response, UrlSearchParams, Window};
 
 use crate::departures::{
-    board, fallback_queries, line_colour, line_ink, station_index, Arrival, Board, Search,
-    SearchResponse, Station, StopPoint, StopPointList, ARRIVALS_BASE, FETCHED_MODES,
-    MODE_STOPS_URL, SEARCH_BASE,
+    board, departure_colour, fallback_queries, line_ink, station_index, Arrival, Board, Platform,
+    Search, SearchResponse, Station, StopDetail, StopPoint, StopPointDetail, StopPointList,
+    ARRIVALS_BASE, FETCHED_MODES, MODE_STOPS_URL, SEARCH_BASE,
 };
 use crate::modes::{Mode, ModeSet};
 
@@ -80,8 +80,16 @@ const FAILED: &str = "Error fetching departures. Please try again later.";
 const NO_MATCH: &str = "No station matches that.";
 
 /// Shown when the reader has switched off every mode a station was served by.
-const STATION_FILTERED_OUT: &str =
-    "That station is not served by the modes you have switched on.";
+const STATION_FILTERED_OUT: &str = "That station is not served by the modes you have switched on.";
+
+/// Shown when the board itself is empty only because a switch is hiding it.
+///
+/// A station with services, all of them switched off, must not read as a station
+/// with no services: the reader needs to know the difference between "nothing is
+/// running" and "you have turned this off", because they can undo the second.
+const MODES_FILTERED_BOARD: &str =
+    "Every service at this station is in a mode you have switched on. Turn one \
+     back on to see it.";
 
 /// Shown when a reader tries to switch off the last remaining mode.
 const NO_MODES_LEFT: &str = "Keep at least one mode switched on.";
@@ -117,7 +125,8 @@ const STATIONS_READY: &str = "Choose a station. Departures come live from the Tf
 
 /// Shown when some lines loaded and some did not, naming the service rather
 /// than the implementation.
-const PARTIAL: &str = "Some lines could not be reached, so the list may be short. Try again shortly.";
+const PARTIAL: &str =
+    "Some lines could not be reached, so the list may be short. Try again shortly.";
 
 /// Shown when a station id in the URL is not one this station list has.
 ///
@@ -181,6 +190,17 @@ struct App {
     /// until the first one, and left at the old value when a refresh fails, so
     /// the stamp keeps counting up and the staleness becomes visible.
     fetched: RefCell<Option<f64>>,
+    /// The board as last fetched, before the mode switches are applied.
+    ///
+    /// This is what makes a toggle instant and a refresh quiet. The board is
+    /// fetched per stop point and covers every mode the station has; which of
+    /// those modes the reader wants to see is a *view* of that fetch, not a
+    /// different fetch. So the raw board is kept here and every toggle simply
+    /// re-filters it — no request, and no chance of the board blanking and
+    /// refilling while the reader is reading it.
+    ///
+    /// `None` until the first arrival lands for the selected station.
+    raw_board: RefCell<Option<Board>>,
     /// Whether a station search is already in flight, so a reader typing quickly
     /// does not queue four requests behind one keyboard.
     searching: RefCell<bool>,
@@ -245,8 +265,26 @@ impl App {
     }
 
     /// Refresh the board for the station on it, and repaint.
+    ///
+    /// **A refresh repaints the timetable and nothing else.** The station name,
+    /// the URL, the page title, the mode switches and the search box are all
+    /// left exactly as they are, and so is the table already on screen until
+    /// the new arrivals have actually arrived. That is the whole of "the whole
+    /// website refreshes to get a new timetable": every one of those things is
+    /// a function of the *station*, not of the time, and re-deriving them
+    /// thirty seconds apart is thirty seconds of churn the reader can see.
+    ///
+    /// The board is stored whole and the switches applied at paint time, so a
+    /// mode toggled on later re-filters this same fetch instead of asking TfL
+    /// again.
     async fn load(self: &Shared, station: &str) {
-        say(&self.departures, LOADING);
+        // Only *before* the first board is there does the reader need to be
+        // told a request is in flight. Afterwards the previous board stays on
+        // screen and simply ages — blanking it every thirty seconds to write
+        // "Loading departures…" and then rebuild it is the churn itself.
+        if self.raw_board.borrow().is_none() {
+            say(&self.departures, LOADING);
+        }
         let url = format!("{ARRIVALS_BASE}{station}/Arrivals");
         let arrivals: Vec<TflArrival> = match fetch_bytes(&url).await {
             Ok(bytes) => match serde_json::from_slice(&bytes) {
@@ -263,12 +301,45 @@ impl App {
                 // whole of the offline behaviour: readable, brief, and the same
                 // whether the network is down or TfL is unwell.
                 web_sys::console::error_1(&JsValue::from_str(&error));
-                say(&self.departures, FAILED);
+                // A refresh that fails must not throw away the board the reader
+                // is already looking at: a departure list thirty seconds stale
+                // is worth more than a page saying it could not refresh.
+                if self.raw_board.borrow().is_none() {
+                    say(&self.departures, FAILED);
+                }
                 return;
             }
         };
         *self.fetched.borrow_mut() = self.window.performance().map(|p| p.now());
-        paint(self, &board(arrivals.into_iter().map(Arrival::from).collect()));
+        let made = board(arrivals.into_iter().map(Arrival::from).collect());
+        *self.raw_board.borrow_mut() = Some(made);
+        self.repaint();
+    }
+
+    /// Draw the board as the current switches want it, from the last fetch.
+    ///
+    /// Split out from [`load`](App::load) so that switching a mode is a repaint
+    /// of data already in hand rather than a second round trip to TfL.
+    ///
+    /// When a switch is hiding services at this station, the board says so. The
+    /// alternative is a reader who turns the buses off at an interchange seeing
+    /// the Underground's trains and concluding the buses were cancelled.
+    fn repaint(self: &Shared) {
+        let Some(raw) = self.raw_board.borrow().clone() else {
+            return;
+        };
+        let modes = *self.modes.borrow();
+        let filtered = raw.filtered(modes);
+        // A board emptied by a switch is a *chosen* state, not a quiet one, so
+        // it gets its own message instead of the empty-board text.
+        if filtered.is_empty() && raw.has_hidden_platforms(modes) {
+            let root = &self.departures;
+            clear(root);
+            say(&self.stamp, &updated_ago(self));
+            paragraph(root, MODES_FILTERED_BOARD);
+            return;
+        }
+        paint(self, &filtered);
     }
 }
 
@@ -278,8 +349,12 @@ type Shared = Rc<App>;
 /// What one mode's fetch produced: its raw bytes, or why it has none.
 type LineResult = Result<Vec<u8>, String>;
 
-/// One mode's fetch, boxed and pinned so the futures can be polled by hand.
+/// One station-list fetch, boxed and pinned so the futures can be polled by
+/// hand.
 type ModeRequest = Pin<Box<dyn Future<Output = (Mode, LineResult)>>>;
+
+/// One stop-detail fetch, boxed and pinned the same way.
+type DetailRequest = Pin<Box<dyn Future<Output = (String, LineResult)>>>;
 
 /// Install the app: build the mode toggles, wire the search box and the
 /// connectivity listeners, read the URL, and start fetching.
@@ -330,6 +405,7 @@ pub fn start() -> Result<(), JsValue> {
         modes: RefCell::new(ModeSet::default_on()),
         selected: RefCell::new(None),
         timer: RefCell::new(None),
+        raw_board: RefCell::new(None),
         fetched: RefCell::new(None),
         searching: RefCell::new(false),
         debounce: RefCell::new(None),
@@ -355,7 +431,12 @@ pub fn start() -> Result<(), JsValue> {
 }
 
 /// Attach an event listener that keeps the app alive for the page's lifetime.
-fn listen(app: &Shared, id: &str, event: &str, handler: impl Fn(&Shared) + 'static) -> Result<(), JsValue> {
+fn listen(
+    app: &Shared,
+    id: &str,
+    event: &str,
+    handler: impl Fn(&Shared) + 'static,
+) -> Result<(), JsValue> {
     let target = element(&app.document, id)?;
     let owned = Rc::clone(app);
     let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
@@ -401,12 +482,8 @@ fn say(element: &Element, text: &str) {
 
 /// A paragraph, built and appended to a parent.
 fn paragraph(parent: &Element, text: &str) -> Element {
-    let document = parent
-        .owner_document()
-        .expect("an element has a document");
-    let p = document
-        .create_element("p")
-        .expect("a <p> element");
+    let document = parent.owner_document().expect("an element has a document");
+    let p = document.create_element("p").expect("a <p> element");
     p.set_text_content(Some(text));
     parent.append_child(&p).expect("append a paragraph");
     p
@@ -414,9 +491,7 @@ fn paragraph(parent: &Element, text: &str) -> Element {
 
 /// A heading at the given level, built and appended to a parent.
 fn heading(parent: &Element, level: u8, text: &str) -> Element {
-    let document = parent
-        .owner_document()
-        .expect("an element has a document");
+    let document = parent.owner_document().expect("an element has a document");
     let h = document
         .create_element(&format!("h{level}"))
         .expect("a heading element");
@@ -427,12 +502,8 @@ fn heading(parent: &Element, level: u8, text: &str) -> Element {
 
 /// A cell, with an optional id used by the shell tests to find it.
 fn cell(row: &Element, text: &str, tag: &str) -> Element {
-    let document = row
-        .owner_document()
-        .expect("an element has a document");
-    let element = document
-        .create_element(tag)
-        .expect("a cell element");
+    let document = row.owner_document().expect("an element has a document");
+    let element = document.create_element(tag).expect("a cell element");
     element.set_text_content(Some(text));
     row.append_child(&element).expect("append a cell");
     element
@@ -559,8 +630,7 @@ async fn load_stations(app: &Shared) {
         .iter()
         .map(|mode| {
             let mode = *mode;
-            Box::pin(async move { (mode, fetch_bytes(&mode_url(mode)).await) })
-                as ModeRequest
+            Box::pin(async move { (mode, fetch_bytes(&mode_url(mode)).await) }) as ModeRequest
         })
         .collect();
     let answers = join_all(requests).await;
@@ -689,17 +759,18 @@ async fn join_all<F>(mut futures: Vec<Pin<Box<dyn Future<Output = F>>>>) -> Vec<
 /// not let a pending `fetch` make progress; polling the twelve futures that way
 /// starves them and never terminates. A timer genuinely yields.
 async fn yield_to_browser() {
-    let promise = js_sys::Promise::new(&mut |resolve: js_sys::Function, _reject: js_sys::Function| {
-        let Some(window) = web_sys::window() else {
-            return;
-        };
-        // The promise's own `resolve` is a function, so it can be the timer
-        // callback directly. `setTimeout(..., 0)` defers to the next turn of
-        // the event loop, which is what makes this a yield rather than a no-op.
-        let callback: &js_sys::Function = resolve.as_ref();
-        let _ =
-            window.set_timeout_with_callback_and_timeout_and_arguments_0(callback, 0);
-    });
+    let promise = js_sys::Promise::new(
+        &mut |resolve: js_sys::Function, _reject: js_sys::Function| {
+            let Some(window) = web_sys::window() else {
+                return;
+            };
+            // The promise's own `resolve` is a function, so it can be the timer
+            // callback directly. `setTimeout(..., 0)` defers to the next turn of
+            // the event loop, which is what makes this a yield rather than a no-op.
+            let callback: &js_sys::Function = resolve.as_ref();
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(callback, 0);
+        },
+    );
     let _ = JsFuture::from(promise).await;
 }
 
@@ -748,6 +819,15 @@ struct TflArrival {
     time_to_station: Option<i32>,
     #[serde(rename = "platformName", default)]
     platform_name: Option<String>,
+    /// Which mode this service runs on.
+    ///
+    /// This is what the mode toggles filter the board by, and what picks a
+    /// row's colour when its line has none of its own. TfL sends it on every
+    /// arrival as `modeName` — "tube", "bus", "river-bus", "elizabeth-line" —
+    /// and it is the only field that can tell a bus route number from a train
+    /// line, because the *name* of a line cannot.
+    #[serde(rename = "modeName", default)]
+    mode_name: Option<String>,
 }
 
 impl From<TflArrival> for Arrival {
@@ -757,6 +837,7 @@ impl From<TflArrival> for Arrival {
             destination: arrival.destination_name.unwrap_or_default(),
             time_to_station: arrival.time_to_station,
             platform: arrival.platform_name,
+            mode: arrival.mode_name.as_deref().and_then(Mode::from_api_name),
         }
     }
 }
@@ -799,7 +880,6 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(js_sys::Uint8Array::new(&buffer).to_vec())
 }
 
-
 /// The picker changed: take the new station, remember it, and show it.
 /// Draw the mode toggles.
 ///
@@ -826,11 +906,7 @@ fn build_toggles(app: &Shared) -> Result<(), JsValue> {
             "style",
             &format!("--chip: {colour}; --chip-ink: {};", line_ink(colour)),
         );
-        button.set_text_content(Some(&format!(
-            "{} {}",
-            mode.glyph(),
-            mode.label()
-        )));
+        button.set_text_content(Some(&format!("{} {}", mode.glyph(), mode.label())));
         let _ = button.set_attribute("data-mode", mode.api_name());
 
         let owned = Rc::clone(app);
@@ -850,6 +926,11 @@ fn build_toggles(app: &Shared) -> Result<(), JsValue> {
 /// is still served by another mode that is on, and it must say so when it is
 /// not — a reader who turns the Underground off while looking at Acton Town
 /// would otherwise be left staring at a board they have switched off.
+///
+/// **No request is made.** The board was fetched whole and is held; which modes
+/// of it to show is a view, so this repaints what is already in hand. That is
+/// what makes the switch instant, and it is also why the board cannot go blank
+/// and refill underneath a reader who is mid-sentence on it.
 fn toggle_mode(app: &Shared, mode: Mode) {
     let mut modes = *app.modes.borrow();
     if modes.contains(mode) {
@@ -872,8 +953,9 @@ fn toggle_mode(app: &Shared, mode: Mode) {
     let _ = refresh_suggestions(app);
     modes_to_url(&app.window, modes);
 
-    // If the station on the board is still reachable, refresh it; if not, say so
-    // and clear the board rather than showing a station that is now filtered out.
+    // If the station on the board is still reachable, re-filter it in place; if
+    // not, say so and clear the board rather than showing a station that is now
+    // filtered out.
     if let Some(id) = app.selected.borrow().clone() {
         let still = app
             .stations
@@ -881,14 +963,11 @@ fn toggle_mode(app: &Shared, mode: Mode) {
             .iter()
             .any(|station| station.all_ids().any(|candidate| *candidate == id));
         if still {
-            let owned = Rc::clone(app);
-            let station_id = id.clone();
-            spawn_local(async move {
-                owned.load(&station_id).await;
-            });
+            app.repaint();
         } else {
             app.stop_timer();
             *app.selected.borrow_mut() = None;
+            *app.raw_board.borrow_mut() = None;
             say(&app.heading, "");
             say(&app.departures, STATION_FILTERED_OUT);
         }
@@ -912,7 +991,11 @@ fn refresh_suggestions(app: &Shared) -> Result<(), JsValue> {
     let shown: Vec<Station> = if query.trim().is_empty() {
         stations.iter().take(6).cloned().collect()
     } else {
-        Search::new(&stations).query(&query, modes).into_iter().cloned().collect()
+        Search::new(&stations)
+            .query(&query, modes)
+            .into_iter()
+            .cloned()
+            .collect()
     };
     drop(stations);
 
@@ -959,6 +1042,20 @@ fn refresh_suggestions(app: &Shared) -> Result<(), JsValue> {
             where_.set_text_content(Some(locality));
             row.append_child(&where_).expect("locality");
         }
+        // What tells two same-named stops apart. Empty for a station whose name
+        // is already unique — an Underground station is not "also" anything —
+        // and it is the only thing that separates "Oxford Circus Station" from
+        // the other three of them in the same forecourt.
+        let described = station
+            .detail
+            .as_ref()
+            .map_or_else(String::new, StopDetail::describe);
+        if !described.is_empty() {
+            let detail = element_of(&row, "span");
+            let _ = detail.set_attribute("class", "detail");
+            detail.set_text_content(Some(&described));
+            row.append_child(&detail).expect("stop detail");
+        }
 
         let owned = Rc::clone(app);
         let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
@@ -982,10 +1079,7 @@ fn refresh_suggestions(app: &Shared) -> Result<(), JsValue> {
 /// TfL for bus stops the local list does not have.
 fn on_typing(app: &Shared) {
     // Editing the search brings the suggestions back; choosing one hid them.
-    let _ = app
-        .document
-        .body()
-        .map(|body| body.set_class_name(""));
+    let _ = app.document.body().map(|body| body.set_class_name(""));
     let query = app.search.value();
     let modes = *app.modes.borrow();
     // Buses and national rail both come from search rather than from a fetched
@@ -1073,8 +1167,10 @@ fn spawn_search(app: &Shared, query: String, modes: ModeSet) {
                     known.push(stop.id.clone());
                     stations.push(Station {
                         ids: vec![(stop.mode, stop.id)],
-                        name: stop.name,
+                        name: stop.name.clone(),
+                        names: vec![stop.name],
                         locality: stop.locality,
+                        detail: None,
                         modes: stop.modes,
                     });
                 }
@@ -1092,7 +1188,91 @@ fn spawn_search(app: &Shared, query: String, modes: ModeSet) {
         // The notice goes back to whatever the last station fetch left, since
         // the search is an addition to the board rather than a state of it.
         let _ = modes;
+
+        // Then, separately, fill in what tells same-named stops apart. The list
+        // is already useful without it — a reader can see the stop exists — so
+        // this does not hold the results back; it improves a list that is
+        // already on screen, and re-renders when it arrives.
+        describe_new_stops(&owned).await;
     });
+}
+
+/// Fetch the stop detail for every stop found that has none yet.
+///
+/// **Only for stops whose name is not already unique.** A `StopPoint/{id}` is
+/// one request per stop, and asking for one for every Underground station in a
+/// search would be a dozen requests to learn nothing. A name that appears once
+/// in the results cannot be confused with another, so it needs no detail; a name
+/// that appears more than once does, and without it the reader is looking at
+/// four identical rows.
+///
+/// The requests are issued together rather than one after another, for the same
+/// reason the station list is: a search that takes four round trips to render
+/// reads as a slow app, and there is no reason for them to queue.
+async fn describe_new_stops(app: &Shared) {
+    let wanted: Vec<String> = {
+        let stations = app.stations.borrow();
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for station in stations.iter() {
+            *counts.entry(station.name.as_str()).or_default() += 1;
+        }
+        stations
+            .iter()
+            .filter(|station| {
+                counts.get(station.name.as_str()).copied().unwrap_or(0) > 1
+                    && station.detail.is_none()
+            })
+            .filter_map(|station| station.ids.first().map(|(_, id)| id.clone()))
+            .collect()
+    };
+    if wanted.is_empty() {
+        return;
+    }
+
+    let requests: Vec<DetailRequest> = wanted
+        .into_iter()
+        .map(|id| {
+            Box::pin(async move {
+                let answer = fetch_bytes(&detail_url(&id)).await;
+                (id, answer)
+            }) as DetailRequest
+        })
+        .collect();
+    let answers = join_all(requests).await;
+
+    let mut filled = 0;
+    {
+        let mut stations = app.stations.borrow_mut();
+        for (id, answer) in answers {
+            let Ok(bytes) = answer else {
+                // A stop we cannot describe is still a stop; the row shows its
+                // name alone rather than the search failing.
+                continue;
+            };
+            let Ok(detail) = serde_json::from_slice::<StopPointDetail>(&bytes) else {
+                continue;
+            };
+            let detail = detail.into_detail();
+            if detail.describe().is_empty() {
+                continue;
+            }
+            if let Some(station) = stations
+                .iter_mut()
+                .find(|station| station.ids.iter().any(|(_, known)| *known == id))
+            {
+                station.detail = Some(detail);
+                filled += 1;
+            }
+        }
+    }
+    if filled > 0 {
+        let _ = refresh_suggestions(app);
+    }
+}
+
+/// The detail URL for one stop point.
+fn detail_url(id: &str) -> String {
+    format!("{ARRIVALS_BASE}{id}")
 }
 
 /// Ask TfL's search endpoint for stops matching a query.
@@ -1268,6 +1448,10 @@ fn show_station(app: &Shared, id: &str) {
         .find(|station| station.all_ids().any(|candidate| candidate == id))
         .map(|station| station.name.clone());
     *app.selected.borrow_mut() = Some(id.to_string());
+    // A new station invalidates the previous station's board. Without this the
+    // old board would be on screen until the new fetch lands, and — worse — it
+    // would be what a mode switch re-filtered in the meantime.
+    *app.raw_board.borrow_mut() = None;
     station_to_url(&app.window, Some(id));
     set_title(app, name.as_deref());
     say(&app.heading, name.as_deref().unwrap_or(""));
@@ -1292,8 +1476,7 @@ fn unpublishable_station(id: &str) -> bool {
     // TfL's own prefix for a national-rail stop point. Anything the API can
     // actually answer for is `940GZZ…` or `910G…` and is served from the cached
     // station list instead.
-    !(id.starts_with("940GZZ") || id.starts_with("910G"))
-        || id.contains("STFODOM")
+    !(id.starts_with("940GZZ") || id.starts_with("910G")) || id.contains("STFODOM")
 }
 
 /// How long ago the board was last fetched, in words.
@@ -1324,17 +1507,26 @@ fn updated_ago(app: &Shared) -> String {
     format!("Updated {ago}.")
 }
 
-/// Render the board.
+/// Render the board, filtered by the switches already applied to it.
 ///
 /// The shape is the original's: a heading, then one table per platform, each
 /// with a heading and three columns. The line cell carries the line's colour
 /// and is marked up as such for anyone who cannot see the colour, which is the
 /// one accessibility gap in a board whose whole signal is colour.
+///
+/// **Platforms are grouped under the mode they belong to.** The mode switches
+/// filter the board, so the board has to show *what* is being filtered — a
+/// reader who turns the Underground off at an interchange sees the buses left,
+/// and a heading is what says the Underground's trains were not missed, they
+/// were switched off. A mode heading is shown whenever the board has more than
+/// one mode in it; for a single-mode station it would be a label for nothing,
+/// and the existing rule of not labelling a lone platform is the same judgement.
 fn paint(app: &Shared, board: &Board) {
     let root = &app.departures;
     clear(root);
     say(&app.stamp, &updated_ago(app));
-    if board.is_empty() {
+
+    if board.platforms.is_empty() {
         // "Nothing due" and "this service publishes nothing" are different
         // answers and a reader needs to be told which one they are looking at.
         let unpublishable = app
@@ -1344,10 +1536,32 @@ fn paint(app: &Shared, board: &Board) {
             .is_some_and(unpublishable_station);
         paragraph(
             root,
-            if unpublishable { NO_DEPARTURES_PUBLISHED } else { EMPTY },
+            if unpublishable {
+                NO_DEPARTURES_PUBLISHED
+            } else {
+                EMPTY
+            },
         );
         return;
     }
+
+    // Platforms are already sorted by platform number then mode, so the modes
+    // arrive in contiguous runs and one pass groups them.
+    let mut groups: Vec<(Option<Mode>, &Platform)> = Vec::new();
+    for platform in &board.platforms {
+        match groups.last_mut() {
+            Some((mode, _)) if *mode == platform.mode => {}
+            _ => groups.push((platform.mode, platform)),
+        }
+    }
+    // A mode heading earns its place only when the board holds more than one
+    // mode: for a station with a single mode it labels the one thing the reader
+    // can already see.
+    let several_modes = board
+        .platforms
+        .iter()
+        .any(|p| p.mode != board.platforms[0].mode);
+
     heading(root, 2, "Departures by Platform");
 
     // One column header for the whole board, not one per platform. A platform
@@ -1364,13 +1578,26 @@ fn paint(app: &Shared, board: &Board) {
     columns.append_child(&head).expect("head");
     root.append_child(&columns).expect("column header");
 
-    for platform in &board.platforms {
+    for (mode, platform) in groups {
+        if several_modes {
+            if let Some(mode) = mode {
+                let title = heading(root, 3, &mode.label());
+                let colour = mode.colour();
+                let _ = title.set_attribute(
+                    "style",
+                    &format!("--chip: {colour}; --chip-ink: {};", line_ink(colour)),
+                );
+                let _ = title.set_attribute("data-mode", mode.api_name());
+            }
+        }
+
         // The platform name goes in the heading only when there is more than one
         // to tell apart. "Platform 1" as a heading above "Platform 1" is a label
         // for nothing, and a board that spends 24px on it has 24px fewer for
-        // trains.
+        // trains. With a mode heading above it, the platform level drops to an
+        // h4 so the document outline still runs in order.
         if board.platforms.len() > 1 {
-            heading(root, 3, &platform.name);
+            heading(root, 4, &platform.name);
         }
         let table = element_of(root, "table");
         let body = element_of(root, "tbody");
@@ -1378,11 +1605,13 @@ fn paint(app: &Shared, board: &Board) {
             let row = element_of(root, "tr");
 
             // The line's name on a chip of the line's own published colour, in
-            // whichever of black or white is legible on it. The colour and the
-            // ink are set as custom properties and the stylesheet consumes them,
-            // so no colour is written in two places and the chip picks up the
-            // shape and the ring from one rule.
-            let colour = line_colour(&departure.line);
+            // whichever of black or white is legible on it. When the line has no
+            // colour of its own — every bus route, every river service — the
+            // mode's colour stands in, so a mode is never a row of grey. The
+            // colour and the ink are set as custom properties and the stylesheet
+            // consumes them, so no colour is written in two places and the chip
+            // picks up the shape and the ring from one rule.
+            let colour = departure_colour(&departure.line, departure.mode);
             let line_cell = element_of(root, "td");
             let chip = element_of(root, "span");
             let _ = chip.set_attribute("class", "chip");
@@ -1428,15 +1657,17 @@ fn paint(app: &Shared, board: &Board) {
                 },
                 "td",
             );
-            let _ = minutes.set_attribute(
-                "class",
-                if due { "minutes due" } else { "minutes" },
-            );
+            let _ = minutes.set_attribute("class", if due { "minutes due" } else { "minutes" });
             body.append_child(&row).expect("row");
         }
         table.append_child(&body).expect("body");
         root.append_child(&table).expect("table");
     }
+
+    // If a mode on this station is switched off, say so rather than leaving the
+    // reader to wonder whether the services they cannot see were cancelled. The
+    // board is filtered by the caller, so the caller passes whether anything
+    // was hidden.
 }
 
 /// Empty an element of its children, without `innerHTML`.
@@ -1462,10 +1693,7 @@ fn element_of(parent: &Element, tag: &str) -> Element {
 /// reader wonders why the minutes stopped moving.
 fn watch_connection(app: &Shared) -> Result<(), JsValue> {
     let notice = element(&app.document, "notice")?;
-    let online = app
-        .window
-        .navigator()
-        .on_line();
+    let online = app.window.navigator().on_line();
     say(
         &notice,
         if online {

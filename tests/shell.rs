@@ -107,7 +107,15 @@ fn the_page_loads_generated_bindings_not_a_manual_wasm_abi() {
 #[test]
 fn the_shell_has_the_ids_the_board_looks_up() {
     let page = shell();
-    for id in ["search", "results", "toggles", "departures", "notice", "station-name", "stamp"] {
+    for id in [
+        "search",
+        "results",
+        "toggles",
+        "departures",
+        "notice",
+        "station-name",
+        "stamp",
+    ] {
         assert!(page.contains(&format!("id=\"{id}\"")), "missing #{id}");
     }
 }
@@ -121,18 +129,39 @@ fn the_shell_is_labelled_live_and_legible_without_colour() {
     // The search field's label is for screen readers; the placeholder is what a
     // sighted reader reads. Both must exist: one without the other leaves either
     // a keyboard user or a sighted one guessing what the box is for.
-    assert!(page.contains("for=\"search\""), "the search field is labelled");
-    assert!(page.contains("placeholder="), "the search field says what it is for");
-    assert!(page.contains("role=\"combobox\""), "the search field is a combobox");
-    assert!(page.contains("role=\"listbox\""), "the results are a listbox");
+    assert!(
+        page.contains("for=\"search\""),
+        "the search field is labelled"
+    );
+    assert!(
+        page.contains("placeholder="),
+        "the search field says what it is for"
+    );
+    assert!(
+        page.contains("role=\"combobox\""),
+        "the search field is a combobox"
+    );
+    assert!(
+        page.contains("role=\"listbox\""),
+        "the results are a listbox"
+    );
     assert!(
         page.contains("visually-hidden"),
         "a label that is only read aloud still has to be hidden from the page"
     );
-    assert!(page.contains("aria-live=\"polite\""), "changing text announces");
-    assert!(page.contains("role=\"status\""), "the notice is a status region");
+    assert!(
+        page.contains("aria-live=\"polite\""),
+        "changing text announces"
+    );
+    assert!(
+        page.contains("role=\"status\""),
+        "the notice is a status region"
+    );
     assert!(page.contains(":focus-visible"), "focus must be visible");
-    assert!(page.contains("prefers-color-scheme"), "dark mode is respected");
+    assert!(
+        page.contains("prefers-color-scheme"),
+        "dark mode is respected"
+    );
     assert!(
         page.contains("prefers-reduced-motion"),
         "reduced motion is respected"
@@ -151,7 +180,10 @@ fn the_shell_is_labelled_live_and_legible_without_colour() {
     // stylesheet consumes it. That indirection is the point: `build.rs` and
     // `ui.rs` agree on `--chip` and `--chip-ink`, and no colour is written in
     // two places.
-    assert!(page.contains("--chip:"), "the chip colour must be a custom property");
+    assert!(
+        page.contains("--chip:"),
+        "the chip colour must be a custom property"
+    );
     assert!(
         page.contains("span[data-line]") || page.contains(".chip {"),
         "the chip styles must target the element that carries the class"
@@ -169,7 +201,10 @@ fn the_shell_is_labelled_live_and_legible_without_colour() {
         "the minutes need their own cell class so they can be the loud thing"
     );
     // The board's one accent, for the minutes, and the "arriving now" mark.
-    assert!(page.contains("--accent"), "the minutes need an accent colour");
+    assert!(
+        page.contains("--accent"),
+        "the minutes need an accent colour"
+    );
     assert!(
         page.contains("td.minutes.due"),
         "arriving now must be distinguishable: it is the one minute count that \
@@ -278,7 +313,9 @@ fn the_service_worker_does_not_cache_or_intercept_the_tfl_api() {
         "the worker must answer only its own assets, not every GET"
     );
     assert!(
-        !code.contains("caches.match(event.request)\n    return cached || fetch(event.request);\n  }"),
+        !code.contains(
+            "caches.match(event.request)\n    return cached || fetch(event.request);\n  }"
+        ),
         "the handler must stay an allowlist"
     );
 }
@@ -340,10 +377,8 @@ fn no_user_visible_text_names_the_implementation() {
     }
 
     // Every string literal `ui.rs` can put on screen.
-    let source = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui.rs"),
-    )
-    .expect("the browser layer");
+    let source = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui.rs"))
+        .expect("the browser layer");
     for line in source.lines() {
         let trimmed = line.trim_start();
         // Only `const NAME: &str = "..."` is a user-visible message. Anything
@@ -547,10 +582,7 @@ fn the_workflow_can_actually_run_its_checks() {
     // the YAML block scalar dedents the whole step, so it lands in column 0 —
     // but it must be the only thing on its line.
     let opened = workflow.matches("<<'PY'").count();
-    let closed = workflow
-        .lines()
-        .filter(|line| line.trim() == "PY")
-        .count();
+    let closed = workflow.lines().filter(|line| line.trim() == "PY").count();
     assert_eq!(
         opened, closed,
         "{opened} heredocs are opened and {closed} are closed; an unterminated \
@@ -714,10 +746,8 @@ fn the_scope_is_a_relative_directory_shared_with_the_worker() {
 /// generated glue's own call is asserted in CI, where `dist/` exists.
 #[test]
 fn the_board_declares_a_start_function() {
-    let source = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui.rs"),
-    )
-    .expect("the browser layer");
+    let source = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui.rs"))
+        .expect("the browser layer");
     assert!(
         source.contains("#[wasm_bindgen(start)]"),
         "src/ui.rs must mark its entry point with #[wasm_bindgen(start)]. A \
@@ -754,7 +784,10 @@ fn the_board_declares_a_start_function() {
 fn the_loader_only_asks_for_the_initializer() {
     let page = shell();
     assert!(page.contains("import('./app.js')"), "the dynamic import");
-    assert!(page.contains("m.default()"), "the initializer is the default export");
+    assert!(
+        page.contains("m.default()"),
+        "the initializer is the default export"
+    );
     assert!(
         !page.contains("m.start(") && !page.contains(".start()"),
         "there is no start export to call; the app runs from the wasm start \
@@ -833,7 +866,13 @@ fn the_original_javascript_pwa_is_gone() {
     let Some(tracked) = tracked_files() else {
         return; // not a checkout
     };
-    for dead in ["app.js", "style.css", "sw.js", "manifest.json", "index.html"] {
+    for dead in [
+        "app.js",
+        "style.css",
+        "sw.js",
+        "manifest.json",
+        "index.html",
+    ] {
         assert!(
             !tracked.lines().any(|line| line == dead),
             "{dead} is still tracked; the JavaScript PWA has been replaced by \
@@ -844,4 +883,340 @@ fn the_original_javascript_pwa_is_gone() {
             "{dead} still exists in the tree"
         );
     }
+}
+
+/// Remove Rust comments from a source file, so an assertion about what the code
+/// *does* cannot be satisfied by a doc comment that merely *describes* it.
+///
+/// This is not a nicety. Every test below asserts that some call is present in
+/// `ui.rs`, and `ui.rs` is a file in which almost every function carries a long
+/// comment explaining why it is the way it is — including, several times, an
+/// explanation of the very call the test is looking for. Without stripping,
+/// deleting the call and leaving the comment behind keeps the test green, which
+/// is worse than having no test: it reports the behaviour is protected when
+/// nothing is.
+fn strip_rust_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut depth = 1;
+                while let Some(c) = chars.next() {
+                    if c == '/' && chars.peek() == Some(&'*') {
+                        chars.next();
+                        depth += 1;
+                    } else if c == '*' && chars.peek() == Some(&'/') {
+                        chars.next();
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else if c == '\n' {
+                        // Keep the line count stable so a failing assertion
+                        // still points at roughly the right place.
+                        out.push('\n');
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The browser layer with its comments removed.
+fn browser_code() -> String {
+    strip_rust_comments(&browser_layer())
+}
+
+/// A switch of mode repaints the board it already has, rather than asking TfL
+/// for it again.
+///
+/// This is the "the whole website refreshes just to update the timetable" fix.
+/// The board is fetched per stop point and covers every mode the station has;
+/// which of them the reader wants is a view of that one fetch. So a toggle must
+/// go through `repaint`, and must not call `load` — a toggle that refetched
+/// would blank the board, show "Loading departures…" and rebuild it underneath
+/// a reader who is mid-sentence on it, thirty seconds of churn for data the app
+/// already had.
+#[test]
+fn switching_a_mode_repaints_and_does_not_refetch() {
+    let code = browser_code();
+    let toggle = code
+        .split("fn toggle_mode")
+        .nth(1)
+        .expect("toggle_mode is in the browser layer")
+        .split("\nfn ")
+        .next()
+        .expect("the body of toggle_mode");
+    assert!(
+        toggle.contains(".repaint()"),
+        "a mode switch must redraw the board it already has"
+    );
+    assert!(
+        !toggle.contains(".load("),
+        "a mode switch must not refetch: it is a filter over data already in \
+         hand, and refetching blanks the board the reader is reading.\n--- \
+         toggle_mode ---\n{toggle}"
+    );
+}
+
+/// A refresh updates the timetable and leaves the rest of the page alone.
+///
+/// The reader-visible symptoms of the old behaviour were three: the board was
+/// blanked to "Loading departures…" on every tick, a failed refresh threw away
+/// a board that was still worth reading, and the whole page was re-derived
+/// thirty seconds apart. The first two are the code below; asserting them here
+/// is what stops them coming back.
+#[test]
+fn a_refresh_only_touches_the_timetable() {
+    let code = browser_code();
+    let load = code
+        .split("async fn load")
+        .nth(1)
+        .expect("load is in the browser layer")
+        .split("\n    /// ")
+        .next()
+        .expect("the body of load");
+    // The loading notice is for a reader who has nothing yet. Written on every
+    // tick it is a thirty-second cycle of blank-and-refill.
+    assert!(
+        load.contains("raw_board.borrow().is_none()"),
+        "the loading notice must wait for a first board, so a refresh does not \
+         blank the one the reader is looking at"
+    );
+    // A failed refresh keeps the board it has.
+    assert!(
+        !load.contains("say(&self.departures, FAILED);")
+            || load.matches("raw_board.borrow().is_none()").count() >= 2,
+        "a failed refresh must not throw away a board that is only thirty \
+         seconds stale"
+    );
+}
+
+/// The board is drawn from a filter, so a switch and a refresh share one path.
+///
+/// One path is the point: if a toggle filtered the board one way and a refresh
+/// another, the same station would show different services depending on which
+/// of the two happened last.
+#[test]
+fn the_board_is_painted_through_the_mode_filter() {
+    let code = browser_code();
+    assert!(
+        code.contains("raw.filtered("),
+        "the board must be filtered by the mode switches before it is painted"
+    );
+}
+
+/// A row's colour comes from the line, or from the mode when the line has none.
+///
+/// The complaint was that every non-Underground service was grey. `line_colour`
+/// alone cannot fix it, because a bus route number is not a key in the line
+/// table; `departure_colour` is the function that falls back to the mode's own
+/// published colour, and `paint` is what has to call it.
+#[test]
+fn a_row_is_coloured_by_its_line_or_its_mode() {
+    let code = browser_code();
+    let paint = code
+        .split("fn paint")
+        .nth(1)
+        .expect("paint is in the browser layer")
+        .split("\nfn ")
+        .next()
+        .expect("the body of paint");
+    assert!(
+        paint.contains("departure_colour("),
+        "a chip must fall back to the mode's colour, or every bus and river \
+         service is grey.\n--- paint ---\n{paint}"
+    );
+    assert!(
+        !paint.contains("line_colour("),
+        "the chip must not be coloured from the line table alone; that is what \
+         left every mode that is not an Underground line without a colour"
+    );
+}
+
+/// The timetable is grouped by mode, so a reader can see what a switch hides.
+///
+/// The switches filter the board, and a filter with no visible effect is
+/// indistinguishable from a broken one. A mode heading over each block is what
+/// says "these are the buses; the trains are switched off".
+#[test]
+fn the_timetable_groups_by_mode() {
+    let code = browser_code();
+    let paint = code
+        .split("fn paint")
+        .nth(1)
+        .expect("paint is in the browser layer")
+        .split("\nfn ")
+        .next()
+        .expect("the body of paint");
+    assert!(
+        paint.contains("data-mode"),
+        "a mode heading must be marked up with its mode, so it can be styled on \
+         that mode's own colour"
+    );
+}
+
+/// Two stops that share a name say something that tells them apart.
+///
+/// This is the bus-stop complaint. `StopPoint/Search` returns every stop on a
+/// street under the street's name, so "Oxford Circus Station" came back several
+/// times over with nothing to choose between. The stop's flag letter, its routes
+/// and its direction are what a reader actually has, and all three come from one
+/// `StopPoint/{id}` request.
+#[test]
+fn a_same_named_stop_is_described_so_it_can_be_told_apart() {
+    let code = browser_code();
+    assert!(
+        code.contains("StopPointDetail"),
+        "the stop detail must be read, or same-named stops stay identical"
+    );
+    assert!(
+        code.contains("fn describe_new_stops"),
+        "the detail must be fetched by a function of its own"
+    );
+    // And it must actually be *called*. Asserting the function exists is not
+    // enough: deleting the call leaves a dead function that satisfies the check
+    // above, and the stops come back indistinguishable — the bug this whole
+    // field exists to fix.
+    assert!(
+        code.contains("describe_new_stops(&owned).await"),
+        "the stop detail must be fetched after a search returns stops; an \
+         uncalled function describes nothing"
+    );
+    let render = code
+        .split("fn refresh_suggestions")
+        .nth(1)
+        .expect("refresh_suggestions is in the browser layer")
+        .split("\nfn ")
+        .next()
+        .expect("the body of refresh_suggestions");
+    assert!(
+        render.contains("StopDetail::describe"),
+        "a suggestion row must show what tells its stop apart from the others"
+    );
+    // And the stylesheet has to have somewhere to put it.
+    let page = shell();
+    assert!(
+        page.contains(".result .detail"),
+        "the stop detail needs a style, or it lands unstyled in the row"
+    );
+}
+
+/// An interchange is one row, and its mode-labelled names still find it.
+///
+/// The duplicate the reader reported: TfL names each half of a station after its
+/// mode, so the Underground, the DLR and the National Rail at one place were
+/// three rows. The merge is in `departures.rs`; what is asserted here is that
+/// the names a reader might type — including the old, mode-stamped ones — are
+/// still kept on the row, because the row is *shown* under a different one.
+#[test]
+fn an_interchange_keeps_the_names_a_reader_will_type() {
+    let source =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/departures.rs"))
+            .expect("the domain");
+    let code = strip_rust_comments(&source);
+    assert!(
+        code.contains("pub fn place_name(") && code.contains("pub fn interchange_key("),
+        "the interchange name rule must exist: TfL names each mode's stop \
+         separately, so one place is several raw names"
+    );
+    assert!(
+        code.contains("pub names: Vec<String>"),
+        "a row must keep every name TfL gave it, so a reader typing the old \
+         mode-stamped name still finds the station"
+    );
+    // The key has to be what rows are actually merged on. Asserting only that
+    // the function exists would pass with the merge reverted, because the
+    // function would still be there and still unused — which is exactly the
+    // state where the duplicates the reader reported come back.
+    let index = code
+        .split("pub fn station_index")
+        .nth(1)
+        .expect("station_index is in the domain")
+        .split("\n/// ")
+        .next()
+        .expect("the body of station_index");
+    assert!(
+        index.contains("interchange_key(&name)"),
+        "rows must be merged on the place name, not the raw per-mode name, or \
+         one interchange is several rows again.\n--- station_index ---\n{index}"
+    );
+}
+
+/// The line column is wide enough for the longest name any board puts in it.
+///
+/// A clipped chip is worse than a narrow one: "Elizabeth li…" is neither a
+/// colour cue nor a name, and the Elizabeth line is the longest `lineName` TfL
+/// sends — so the column that carries every line's colour is exactly the one
+/// that cuts off the longest of them.
+///
+/// The floor is **measured, not guessed**: at 375px (the phone breakpoint) the
+/// rendered cell is 108px and the rendered "Elizabeth line" chip is 74px, and at
+/// 500px they are 120px and 79px. A declared width below 6rem puts the cell
+/// under 96px, which is under the chip plus the cell's own 12px of padding, and
+/// the chip is then clipped. `6rem` is the floor with a real margin under it.
+#[test]
+fn the_line_column_fits_the_longest_chip() {
+    let page = shell();
+    let minimum = 6.0f64; // rem — see the measured figures above
+    let mut widths: Vec<f64> = Vec::new();
+    for line in page.lines().filter(|line| line.contains("td:nth-child(1)")) {
+        let Some(rest) = line.split("width:").nth(1) else {
+            continue;
+        };
+        let Some(value) = rest.split(';').next() else {
+            continue;
+        };
+        let Some(rem) = value.trim().strip_suffix("rem") else {
+            continue;
+        };
+        if let Ok(rem) = rem.trim().parse::<f64>() {
+            widths.push(rem);
+        }
+    }
+    assert!(
+        widths.len() >= 2,
+        "both the desktop and the phone line column must declare a width"
+    );
+    for width in &widths {
+        assert!(
+            *width >= minimum,
+            "the line column is {width}rem, narrower than the longest chip on \
+             the board needs; every line colour would be clipped"
+        );
+    }
+    // The chip must also be allowed to fill the cell rather than overflow it.
+    assert!(
+        page.contains("td:first-child .chip"),
+        "a chip must be bounded by its own column"
+    );
 }

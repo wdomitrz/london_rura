@@ -200,6 +200,19 @@ body:not(.chosen) #results:empty { display: none; }
 }
 .result:hover, .result:focus-visible { background: var(--raised); }
 .result .locality { margin-left: auto; font-size: 11px; color: var(--faint); }
+/* What tells two stops of one name apart: the flag letter a reader can match
+   against the one they are standing at, then the routes, then the direction.
+   Without it a station forecourt is a list of identical rows. Muted and small,
+   because it qualifies the name rather than being the thing being chosen. */
+.result .detail {
+  font-size: 10.5px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 45%;
+}
 #results p { margin: 4px 2px; font-size: 11.5px; color: var(--faint); }
 
 /* --- chips: the line or mode name on its own colour --- */
@@ -221,6 +234,11 @@ body:not(.chosen) #results:empty { display: none; }
   white-space: nowrap;
 }
 .chip.small { height: 14px; font-size: 9.5px; padding: 0 5px; border-radius: 7px; }
+/* A chip in the line column must show its whole name. `min-width` lets a short
+   one (a bus route number) stay a tidy pill while a long one grows, and
+   `max-width: 100%` plus the cell's own overflow rules keep a name TfL sends
+   that is longer than any column from spilling across the row. */
+td:first-child .chip { max-width: 100%; }
 
 /* --- the board itself --- */
 #departures { margin-top: 10px; }
@@ -235,7 +253,7 @@ body:not(.chosen) #results:empty { display: none; }
 #departures p { margin: 6px 0; font-size: 12px; color: var(--dim); }
 /* A platform heading, inline and quiet: a board labels each column, not each
    block with a paragraph. */
-h3 {
+h3, h4 {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -246,12 +264,32 @@ h3 {
   letter-spacing: 0.1em;
   color: var(--dim);
 }
-h3::after {
+/* A mode heading sits on the mode's own colour, like a chip, so an interchange's
+   halves are separated by the same signal the rows below use. The name is still
+   text on it, so it reads without the colour. */
+h3[data-mode] {
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--chip);
+  color: var(--chip-ink);
+  box-shadow: 0 0 0 1px var(--ring);
+  align-self: flex-start;
+  letter-spacing: 0.06em;
+}
+h3::after, h4::after {
   content: "";
   flex: 1;
   height: 1px;
   background: var(--rule);
 }
+/* Under a mode heading the platform is the second level, so it is quieter still
+   and does not need the rule. */
+h4 {
+  margin: 6px 0 1px;
+  font-size: 9.5px;
+  color: var(--faint);
+}
+h4::after { display: none; }
 table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 thead th {
   padding: 0 6px 2px;
@@ -263,9 +301,13 @@ thead th {
   text-align: left;
 }
 /* Line, then destination, then the minutes. Fixed widths so the columns do not
-   jump between rows as destinations change length. */
-th:nth-child(1), td:nth-child(1) { width: 5.5rem; }
-th:nth-child(3), td:nth-child(3) { width: 4.5rem; text-align: right; }
+   jump between rows as destinations change length. The line column is sized to
+   its widest real chip — the Elizabeth line's "Elizabeth line", which is the
+   longest name on any board — plus the chip's own padding and the cell's, so a
+   chip is never clipped by the column it sits in. A clipped chip is worse than
+   an unhelpful one: "Elizabeth li…" is not a colour cue and not a name either. */
+th:nth-child(1), td:nth-child(1) { width: 7.5rem; }
+th:nth-child(3), td:nth-child(3) { width: 3.25rem; text-align: right; }
 td {
   height: var(--row);
   padding: 1px 6px;
@@ -296,10 +338,14 @@ td.no-platform { color: var(--faint); }
 /* A phone in portrait is the case this board is for. */
 @media (max-width: 30rem) {
   main { padding: 6px 8px 32px; }
-  th:nth-child(1), td:nth-child(1) { width: 4.5rem; }
-  th:nth-child(3), td:nth-child(3) { width: 3.75rem; }
+  /* Narrow, but still wide enough for the longest chip on the board: the
+     Elizabeth line. Trimming this is what made "Elizabeth line" read as
+     "Elizabeth li…" on a phone, which is the column that carries the colour. */
+  th:nth-child(1), td:nth-child(1) { width: 6.75rem; }
+  th:nth-child(3), td:nth-child(3) { width: 3rem; }
   td { font-size: 12px; }
   td.minutes { font-size: 13px; }
+  .chip { font-size: 10px; padding: 0 5px; }
 }
 </style>
 </head>
