@@ -137,9 +137,7 @@ fn rasterize(svg: &[u8], size: u32) -> Vec<u8> {
     let mut transform = tiny_skia::Transform::from_scale(scale, scale);
     transform = transform.pre_translate((size as f32 - drawn) / 2.0, (size as f32 - drawn_y) / 2.0);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
-    pixmap
-        .encode_png()
-        .expect("encoding the install PNG")
+    pixmap.encode_png().expect("encoding the install PNG")
 }
 
 /// The manifest, as the spec's shape, with the app's own name and colours.
