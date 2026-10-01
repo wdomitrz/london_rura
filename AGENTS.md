@@ -154,6 +154,53 @@ CORS is not a problem: TfL sends permissive `Access-Control-Allow-Origin` on
 this API, so a plain cross-origin `fetch` works with no proxy. It is still
 handled as a failure, because it is one whenever the network is not there.
 
+## Modes, and the Elizabeth line that was missing
+
+The board serves **eight modes**, switchable from the header: Underground,
+Elizabeth line, Overground, DLR, Buses, Cable car, Cycles, River. Each has a name,
+a colour and a glyph in `src/modes.rs`, and the mode switches are in the URL
+(`?modes=dlr,bus`), so a filtered board is a link a reader can send.
+
+**The previous version had one mode and hid three others by accident.** It
+filtered stations on the stop-point id prefixes `940GZZLU` and `940GZZCR`, which
+is a filter for *the Underground* wearing the costume of a filter for *a station*.
+It discarded the Elizabeth line (`910G…`), the Overground (`910G…`), the DLR
+(`940GZZDL…`) and the cable car — silently, with no error anywhere — while the
+app's own request asked for `tube,elizabeth-line` and threw the Elizabeth line
+stops away. Keeping it was defensible as "faithful to the original" and it was
+the wrong call: the original was one of six apps and the point of the rewrite was
+to be better than the original.
+
+Now the filter is only "has a name", the modes come from the API, and
+`a_station_is_anything_with_a_name_in_any_mode` and
+`every_mode_maps_to_a_known_api_name` pin it. The second is the one that matters:
+`Mode` is an enum, so adding a mode and forgetting to map it **compiles, runs,
+and silently narrows the list to nothing** — which is exactly how the Elizabeth
+line disappeared, by no test at all.
+
+### One station, one id per mode
+
+An interchange is one row holding an id per mode, merged by name. This is what
+the previous version could not do: one id per station meant picking Paddington
+showed the Underground's board and the Elizabeth line's trains were never
+requested — and requesting the Underground's id for the Elizabeth line returns
+**zero** arrivals, so the omission was invisible rather than obviously wrong.
+
+Bus stops are keyed by their own id instead of their name, because a bus stop is
+named for the street it stands on and "Oxford Circus Station" is a dozen separate
+rows; folding them together would invent a station that does not exist.
+
+### Buses are reached by search, not by download
+
+`StopPoint/Mode/bus` is an **HTTP 400**. There is no bus list to fetch, and there
+are ~19,000 bus stops against 270 Underground stations — a picker of bus stops is
+not a departures board. So the buses toggle turns on *search*: type a place name
+and `StopPoint/Search/{query}` returns bus stops with live arrivals
+(`490000173RC` → 13 arrivals with real route numbers, measured). Results are
+merged into the station list, so they are searchable afterwards rather than being
+a suggestion the reader has to catch. Typing is debounced by 250 ms, so "barking"
+is one request rather than seven.
+
 ## The TfL API, measured
 
 Everything here was measured against the live API on 2026-09-30, not read off
@@ -189,7 +236,30 @@ and none extra — for 81% fewer bytes, with a maximum single response of one
 line rather than the whole network. Stations served by three lines appear three
 times and are deduplicated.
 
-**3. The stop-point list sends `id`, not `stopPointId`.** The older TfL Unified
+**3. `StopPoint/Mode/{mode}` returns a wrapper, not an array.** It answers
+`{"$type": …, "stopPoints": [...]}`. Deserialising that as a `Vec<StopPoint>`
+fails to parse, the failure is caught, and the board reports it could not load
+any stations — **with every HTTP status at 200**. It looks exactly like being
+offline. `StopPointList` and its test exist so that cannot recur quietly.
+
+**4. Only `940GZZ…` and `910G…` ids return arrivals.** Among 1,751 named tube
+stop points the prefixes are `9400ZZLU` (918), `4900ZZLU` (479), `940GZZLU` (270),
+`2100ZZLU` (7), `0400ZZLU` (4). Measured one of each against `/Arrivals`:
+
+| prefix | example | arrivals |
+|---|---|---|
+| `940GZZLU` | `940GZZLUACT` | **live** |
+| `9400ZZLU` | `9400ZZLUACT` | 0 |
+| `4900ZZLU` | `4900ZZLUACT1` | 0 |
+| `2100ZZLU` | `2100ZZLUCXY0` | 0 |
+| `0400ZZLU` | `0400ZZLUAMS0` | 0 |
+
+Amersham appears twice in one response: `940GZZLUAMS` returns live Metropolitan
+trains, `0400ZZLUAMS0` returns none. So an id being present in a stop-point list
+is **no evidence it is worth requesting** — `is_requestable` is the predicate
+that stands between a station appearing in the picker and it having a board.
+
+**5. The stop-point list sends `id`, not `stopPointId`.** The older TfL Unified
 API documentation shows `stopPointId`; the live endpoint does not send it, and
 of 1,858 stop points, **zero** carry it. Deserialising that name leaves every
 id as the empty string, every id fails the prefix test, and the picker is
@@ -397,13 +467,18 @@ Two things that page view is the only way to get:
 
 ## Code map
 
-- `departures.rs`: the whole board, with no browser in it. The stop-point
-  filter (`940GZZLU`/`940GZZCR` plus a `commonName`), the alphabetical station
-  order, the sort by `timeToStation`, the grouping by `platformName` (falling
-  back to "Unknown Platform"), the platform ordering by the first run of digits
-  in the name, `floor(timeToStation / 60)`, the ten-per-platform cut, and the
-  line-colour table with its `#666` default. Pure, and the unit tests at the
-  bottom of the file drive all of it with fixture data.
+- `modes.rs`: the eight modes — name, short name, glyph, TfL colour — and the
+  `ModeSet` bitmask behind the switches. Pure, and the unit tests pin that every
+  mode round-trips through `from_api_name` and is readable on its own chip.
+- `departures.rs`: the whole board, with no browser in it. `is_station` (a name is
+  all it takes), `is_requestable` (does the arrivals endpoint answer for this id),
+  `station_index` (merge per-mode responses by name into one row per place with an
+  id per mode), `Search` (ranked station matching), the sort by `timeToStation`,
+  the grouping by `platformName` (falling back to "Unknown Platform"), the
+  platform ordering by the first run of digits in the name, `floor(timeToStation
+  / 60)`, the ten-per-platform cut, and the line-colour table with its `#666`
+  default. Pure, and the unit tests at the bottom of the file drive all of it
+  with fixture data taken from real responses.
 - `ui.rs`: wasm-only. The fetches to TfL — one per line, joined concurrently,
   parsed from bytes — the DOM, the thirty-second refresh timer, the
   `?station=` parameter, the page title, the connectivity notice and the
@@ -413,7 +488,10 @@ Two things that page view is the only way to get:
   why that is not interchangeable with `#[wasm_bindgen]`.
 - `ui.html`: the static shell, copied to `dist/index.html` byte for byte. One
   inline `<style>`, one `<script type="module">`, and empty containers Rust
-  fills.
+  fills: the toggle row, the search field, the suggestion list, the station
+  heading, the freshness stamp and the board. It is dense on purpose — 22px rows,
+  one column header for the whole board, and the minutes as the only bright
+  thing on the page.
 - `service-worker.js`: the shell cache and nothing else; see "Offline" above.
 - `build.rs`: writes the six files it owns into `dist/`, rasterizes the icon,
   assembles the manifest, and derives the worker's content-derived cache
