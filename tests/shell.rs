@@ -1220,3 +1220,155 @@ fn the_line_column_fits_the_longest_chip() {
         "a chip must be bounded by its own column"
     );
 }
+
+/// Every platform the domain produced gets its own table.
+///
+/// **This is a regression test for the board showing one platform instead of
+/// all of them.** The mode-run grouping in `paint` used to collapse a run of
+/// same-mode platforms to its *first* platform, so a station whose eight
+/// platforms are all the Underground — King's Cross, measured at eight live
+/// platforms — rendered one table and silently dropped the other seven. The
+/// domain had grouped them correctly throughout; only the renderer lost them.
+///
+/// The check is structural: a loop over the runs must be followed by a loop
+/// over the platforms *inside* each run, and the run loop must hold a
+/// collection rather than a single platform. Asserting on the run loop alone
+/// is what let the original through — it had one, and it was wrong.
+#[test]
+fn every_platform_gets_its_own_table() {
+    let code = browser_code();
+    let paint = code
+        .split("fn paint")
+        .nth(1)
+        .expect("paint is in the browser layer")
+        .split("\n/// ")
+        .next()
+        .expect("the body of paint");
+
+    // The runs must collect their platforms rather than keeping one.
+    assert!(
+        paint.contains("Vec<(Option<Mode>, Vec<&Platform>)>"),
+        "a mode run must hold every platform it covers, not just the first -- \
+         that is what hid seven of King's Cross's eight platforms"
+    );
+    // **The accumulation, not just the type.** A `Vec` that is declared and
+    // then only ever pushed one element at a time compiles identically and
+    // behaves exactly as the bug did, so the type alone is not evidence. What
+    // has to be there is a run that *gains* the platform it already covers.
+    assert!(
+        paint.contains("members.push(platform)"),
+        "a platform that continues the current mode's run must be added to \
+         that run; without this every run holds one platform and only the \
+         first platform of each mode is drawn"
+    );
+    // And the render loop must walk the platforms inside a run.
+    assert!(
+        paint.contains("for platform in members"),
+        "the renderer must draw each platform in a mode run, not the run's \
+         first platform"
+    );
+    // A run must produce one table per platform, not one table.
+    let append = paint.matches("root.append_child(&table)").count();
+    assert_eq!(
+        append, 1,
+        "the table is appended once inside the per-platform loop"
+    );
+    assert!(
+        paint.contains("root.append_child(&table)"),
+        "each platform's table must be appended to the board"
+    );
+}
+
+/// The domain must keep one table's worth of platforms per platform.
+///
+/// The renderer's fix is only correct if the board it is handed actually holds
+/// every platform. King's Cross is the case that broke: eight platforms, all
+/// Underground, and the run grouping used to show one.
+#[test]
+fn a_board_keeps_every_platform_of_a_single_mode_station() {
+    use london_rura::departures::{board, Arrival, Platform};
+    use london_rura::modes::Mode;
+
+    let arrivals: Vec<Arrival> = [
+        ("Westbound - Platform 1", "Uxbridge", 120),
+        ("Eastbound - Platform 2", "Epping", 300),
+        ("Southbound - Platform 8", "Wimbledon", 480),
+        ("Northbound - Platform 7", "Mill Hill East", 600),
+        ("Eastbound - Platform 6", "Hainault", 720),
+        ("Westbound - Platform 5", "Chesham", 840),
+        ("Southbound - Platform 4", "Wimbledon", 960),
+        ("Northbound - Platform 3", "High Barnet", 1080),
+    ]
+    .iter()
+    .map(|(platform, destination, seconds)| Arrival {
+        line_name: "Piccadilly".to_string(),
+        destination: (*destination).to_string(),
+        time_to_station: Some(*seconds),
+        platform: Some((*platform).to_string()),
+        mode: Some(Mode::Tube),
+    })
+    .collect();
+
+    let made = board(arrivals);
+    assert_eq!(
+        made.platforms.len(),
+        8,
+        "eight platforms are eight tables: {:?}",
+        made.platforms
+            .iter()
+            .map(|p: &Platform| p.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    // Every one of them is the same mode, which is precisely the case the
+    // renderer used to collapse.
+    assert!(
+        made.platforms.iter().all(|p| p.mode == Some(Mode::Tube)),
+        "all eight are Underground"
+    );
+    assert_eq!(
+        made.platforms[0].name, "Westbound - Platform 1",
+        "platforms stay in platform order"
+    );
+}
+
+/// A service with no destination name shows what TfL said instead of a dash.
+///
+/// At King's Cross the Hammersmith & City services arrive with an empty
+/// `destinationName` and `towards: "Check Front of Train"`. That is a working
+/// notice for the crew rather than a passenger destination, and it is the only
+/// thing TfL says about where the train is going. Rendered as a dash the row
+/// read as missing data; rendered as itself it is the instruction a reader
+/// standing on that platform needs.
+///
+/// `towards` is a **fallback**, not a replacement: TfL sends it on ordinary
+/// services too, where it repeats the destination, and a duplicate would be
+/// worse than the name alone.
+#[test]
+fn a_missing_destination_falls_back_to_what_tfl_actually_said() {
+    let code = browser_code();
+    assert!(
+        code.contains("fn destination_of("),
+        "the destination cell must be decided in one place, so the fallback is \
+         one rule rather than a special case at each use"
+    );
+    let helper = code
+        .split("fn destination_of(")
+        .nth(1)
+        .expect("destination_of is in the browser layer")
+        .split("\nfn ")
+        .next()
+        .expect("the body of destination_of");
+    assert!(
+        helper.contains("destination_name"),
+        "the named destination must be preferred when there is one"
+    );
+    assert!(
+        helper.contains("towards"),
+        "the towards field must be the fallback when no name was given"
+    );
+    // And the wire field must actually be read, or the fallback is empty.
+    assert!(
+        code.contains("#[serde(rename = \"towards\""),
+        "the towards field must be deserialised from the arrival"
+    );
+}
