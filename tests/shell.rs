@@ -107,7 +107,7 @@ fn the_page_loads_generated_bindings_not_a_manual_wasm_abi() {
 #[test]
 fn the_shell_has_the_ids_the_board_looks_up() {
     let page = shell();
-    for id in ["station", "departures", "notice"] {
+    for id in ["search", "results", "toggles", "departures", "notice", "station-name", "stamp"] {
         assert!(page.contains(&format!("id=\"{id}\"")), "missing #{id}");
     }
 }
@@ -118,7 +118,17 @@ fn the_shell_has_the_ids_the_board_looks_up() {
 #[test]
 fn the_shell_is_labelled_live_and_legible_without_colour() {
     let page = shell();
-    assert!(page.contains("<label for=\"station\">"), "the picker is labelled");
+    // The search field's label is for screen readers; the placeholder is what a
+    // sighted reader reads. Both must exist: one without the other leaves either
+    // a keyboard user or a sighted one guessing what the box is for.
+    assert!(page.contains("for=\"search\""), "the search field is labelled");
+    assert!(page.contains("placeholder="), "the search field says what it is for");
+    assert!(page.contains("role=\"combobox\""), "the search field is a combobox");
+    assert!(page.contains("role=\"listbox\""), "the results are a listbox");
+    assert!(
+        page.contains("visually-hidden"),
+        "a label that is only read aloud still has to be hidden from the page"
+    );
     assert!(page.contains("aria-live=\"polite\""), "changing text announces");
     assert!(page.contains("role=\"status\""), "the notice is a status region");
     assert!(page.contains(":focus-visible"), "focus must be visible");
@@ -137,13 +147,34 @@ fn the_shell_is_labelled_live_and_legible_without_colour() {
         page.contains("--ring"),
         "chips need an edge, or a line's own colour disappears into the page"
     );
+    // The chip's colour arrives as a custom property set inline by Rust, and the
+    // stylesheet consumes it. That indirection is the point: `build.rs` and
+    // `ui.rs` agree on `--chip` and `--chip-ink`, and no colour is written in
+    // two places.
+    assert!(page.contains("--chip:"), "the chip colour must be a custom property");
     assert!(
-        page.contains("span[data-line]"),
-        "the chip styles must target the element that carries the attribute"
+        page.contains("span[data-line]") || page.contains(".chip {"),
+        "the chip styles must target the element that carries the class"
+    );
+    assert!(
+        page.contains("box-shadow: 0 0 0 1px var(--ring)"),
+        "a chip without its ring disappears into the page for two of the twelve \
+         published colours"
+    );
+    // Density is the complaint this rewrite answers, so it is asserted rather
+    // than left to taste: a row height and a type size, both small.
+    assert!(page.contains("--row:"), "rows must have a declared height");
+    assert!(
+        page.contains("td.minutes"),
+        "the minutes need their own cell class so they can be the loud thing"
     );
     // The board's one accent, for the minutes, and the "arriving now" mark.
     assert!(page.contains("--accent"), "the minutes need an accent colour");
-    assert!(page.contains("td.due"), "arriving now must be distinguishable");
+    assert!(
+        page.contains("td.minutes.due"),
+        "arriving now must be distinguishable: it is the one minute count that \
+         means the train is at the platform"
+    );
     assert!(
         page.contains("<noscript>"),
         "the page must say what it needs"

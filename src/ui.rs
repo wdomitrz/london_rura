@@ -29,15 +29,19 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::{spawn_local, JsFuture};
-use web_sys::{
-    Document, Element, HtmlOptionElement, HtmlSelectElement, Location, Response, UrlSearchParams,
-    Window,
-};
+use web_sys::{Document, Element, HtmlInputElement, Location, Response, UrlSearchParams, Window};
 
 use crate::departures::{
-    board, line_colour, line_ink, station_list, Arrival, Board, Station, StopPoint,
-    ARRIVALS_BASE, LINE_IDS, LINE_STOPS_URL,
+    board, line_colour, line_ink, station_index, Arrival, Board, Search, Station, StopPoint,
+    StopPointList, ARRIVALS_BASE, FETCHED_MODES, MODE_STOPS_URL, SEARCH_BASE,
 };
+use crate::modes::{Mode, ModeSet};
+
+/// Stands in for an arrival with no destination named.
+///
+/// TfL sends an empty `destinationName` for some services. An empty cell reads
+/// as a broken table; a dash reads as "none given", which is the truth.
+const NO_DESTINATION: &str = "\u{2014}";
 
 /// The message shown when no station is chosen.
 ///
@@ -56,6 +60,32 @@ const EMPTY: &str = "No upcoming departures found.";
 /// sees. Deliberately one message for both: the reader cannot act on the
 /// difference, and the original's was the same.
 const FAILED: &str = "Error fetching departures. Please try again later.";
+
+/// Shown when a search matches nothing, on the board's own terms.
+///
+/// It is not an error: TfL's search covers every stop point in London and a
+/// reader typing a misspelling gets nothing back, which is a fact about the
+/// query rather than about the network.
+const NO_MATCH: &str = "No station matches that.";
+
+/// Shown when the reader has switched off every mode a station was served by.
+const STATION_FILTERED_OUT: &str =
+    "That station is not served by the modes you have switched on.";
+
+/// Shown when a reader tries to switch off the last remaining mode.
+const NO_MODES_LEFT: &str = "Keep at least one mode switched on.";
+
+/// Shown when a search finds nothing locally and TfL is asked instead.
+///
+/// This is the bus case: there is no bus list to download, so a search is the
+/// only route to a bus stop.
+const SEARCHING: &str = "Searching…";
+
+/// How many characters to type before asking TfL about a bus stop.
+///
+/// Two characters is enough to be specific and short enough not to fire on every
+/// keystroke of a word the reader is still writing.
+const MIN_SEARCH_CHARS: usize = 2;
 
 /// Shown when the station list itself cannot be loaded.
 ///
@@ -112,14 +142,26 @@ const SCOPE: &str = "./";
 struct App {
     window: Window,
     document: Document,
-    /// The picker. Its options are built once and never rebuilt.
-    select: HtmlSelectElement,
     /// Where the board is rendered.
     departures: Element,
-    /// The stations, kept because the timer needs to re-read the selection
-    /// without a round trip, and the title needs their names.
+    /// Where the search suggestions are rendered.
+    results: Element,
+    /// Where the mode toggles are rendered.
+    toggles: Element,
+    /// Where the current station's name is shown.
+    heading: Element,
+    /// Where the freshness stamp is shown, in the header.
+    stamp: Element,
+    /// The search field.
+    search: HtmlInputElement,
+    /// Every station the fetches found, with an id per mode.
+    ///
+    /// This is the whole list; the picker filters it rather than holding its own
+    /// copy, so switching a mode on cannot leave a stale option behind.
     stations: RefCell<Vec<Station>>,
-    /// The id of the station on the board, or `None` when the picker is empty.
+    /// Which modes are switched on. The toggle's whole state.
+    modes: RefCell<ModeSet>,
+    /// The id of the station on the board, or `None` when nothing is chosen.
     selected: RefCell<Option<String>>,
     /// The refresh timer. `None` while no station is chosen, because there is
     /// nothing to refresh.
@@ -128,7 +170,22 @@ struct App {
     /// until the first one, and left at the old value when a refresh fails, so
     /// the stamp keeps counting up and the staleness becomes visible.
     fetched: RefCell<Option<f64>>,
+    /// Whether a station search is already in flight, so a reader typing quickly
+    /// does not queue four requests behind one keyboard.
+    searching: RefCell<bool>,
+    /// The pending debounced search, if one is scheduled. Replacing it cancels
+    /// the previous, so the last keystroke is the one that searches.
+    debounce: RefCell<Option<i32>>,
+    /// What the debounced search will look for. Stored rather than captured by
+    /// the timer's closure; see `debounce_search` for why.
+    pending_query: RefCell<String>,
 }
+
+/// How long to wait after the last keystroke before asking TfL.
+///
+/// 250 ms is long enough that typing "barking" is one request rather than
+/// seven, and short enough that the list still feels attached to the keyboard.
+const SEARCH_DEBOUNCE_MS: i32 = 250;
 
 impl App {
     /// Stop the refresh timer, if one is running.
@@ -207,32 +264,32 @@ impl App {
 /// The application, as one shared `Rc` — every handler and the timer share it.
 type Shared = Rc<App>;
 
-/// What one line's fetch produced: its raw bytes, or why it has none.
+/// What one mode's fetch produced: its raw bytes, or why it has none.
 type LineResult = Result<Vec<u8>, String>;
 
-/// One line's fetch, boxed and pinned so the futures can be polled by hand.
-type LineRequest = Pin<Box<dyn Future<Output = (&'static str, LineResult)>>>;
+/// One mode's fetch, boxed and pinned so the futures can be polled by hand.
+type ModeRequest = Pin<Box<dyn Future<Output = (Mode, LineResult)>>>;
 
-/// Install the app: build the picker's options, wire the change handler, read
-/// the URL, and start fetching.
+/// Install the app: build the mode toggles, wire the search box and the
+/// connectivity listeners, read the URL, and start fetching.
 ///
 /// **`#[wasm_bindgen(start)]`, and that attribute is the whole reason this app
-/// worked at all.** It marks the function as the module's start function, which
+/// works at all.** It marks the function as the module's start function, which
 /// `wasm-bindgen` emits into the wasm's start section and the generated glue
-/// calls during initialization. A plain `#[wasm_bindgen]` — which is what this
-/// was — declares an ordinary *export*: the symbol is in the wasm, and the glue
-/// does not re-export it, so there is no way to reach it from JavaScript. The
-/// shell's loader calls the module's default export, which only initializes the
-/// module, and nothing ever called this. The result was a page that loaded
-/// cleanly, drew its static shell, and then sat on "Loading stations…" forever
+/// calls during initialisation. A plain `#[wasm_bindgen]` — which is what this
+/// once was — declares an ordinary *export*: the symbol is in the wasm, and the
+/// glue does not re-export it, so there is no way to reach it from JavaScript.
+/// The shell's loader calls the module's default export, which only initialises
+/// the module, and nothing ever called this. The result was a page that loaded
+/// cleanly, drew its static shell, and then sat on its loading message forever
 /// with no error anywhere — because nothing had failed. Nothing was running.
 ///
-/// The body is synchronous on purpose: a start function cannot be awaited, so
-/// the first thing it does is hand the real work to `spawn_local`.
+/// The body is synchronous on purpose: a start function cannot be awaited, so it
+/// does its wiring and hands the real work to `spawn_local`.
 ///
-/// The return value is a `JsValue` purely so a failure during setup can
-/// surface as a thrown error for the loader's `catch`; the app renders its own
-/// messages for anything a user can act on.
+/// The return value is a `JsValue` purely so a failure during setup can surface
+/// as a thrown error for the loader's `catch`; the app renders its own messages
+/// for anything a user can act on.
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsValue> {
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
@@ -240,35 +297,42 @@ pub fn start() -> Result<(), JsValue> {
         .document()
         .ok_or_else(|| JsValue::from_str("no document"))?;
 
-    let select: HtmlSelectElement = element(&document, "station")?
+    let search: HtmlInputElement = element(&document, "search")?
         .dyn_into()
-        .map_err(|_| JsValue::from_str("#station is not a select"))?;
+        .map_err(|_| JsValue::from_str("#search is not an input"))?;
     let departures = element(&document, "departures")?;
+    let results = element(&document, "results")?;
+    let toggles = element(&document, "toggles")?;
+    let heading = element(&document, "station-name")?;
+    let stamp = element(&document, "stamp")?;
 
     let app: Shared = Rc::new(App {
         window: window.clone(),
         document: document.clone(),
-        select,
         departures,
+        results,
+        toggles,
+        heading,
+        stamp,
+        search,
         stations: RefCell::new(Vec::new()),
+        modes: RefCell::new(ModeSet::default_on()),
         selected: RefCell::new(None),
         timer: RefCell::new(None),
         fetched: RefCell::new(None),
+        searching: RefCell::new(false),
+        debounce: RefCell::new(None),
+        pending_query: RefCell::new(String::new()),
     });
 
-    // The picker. Its listener lives as long as the select does, so the
-    // closure is leaked; the app is held strongly, because it is the page's.
-    {
-        let target = app.select.clone();
-        let owned = Rc::clone(&app);
-        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
-            on_change(&owned);
-        });
-        app.select
-            .add_event_listener_with_callback("change", callback.as_ref().unchecked_ref())?;
-        callback.forget();
-        let _ = target;
+    if let Some(from_url) = modes_from_url(&window) {
+        *app.modes.borrow_mut() = from_url;
     }
+    build_toggles(&app)?;
+    listen(&app, "search", "input", on_typing)?;
+    // `change` fires on Enter and on blur, so a reader who types a name and
+    // presses Enter gets the first suggestion without touching the mouse.
+    listen(&app, "search", "change", on_submit)?;
     watch_connection(&app)?;
     register_service_worker(&window)?;
 
@@ -276,6 +340,20 @@ pub fn start() -> Result<(), JsValue> {
     spawn_local(async move {
         load_stations(&app).await;
     });
+    Ok(())
+}
+
+/// Attach an event listener that keeps the app alive for the page's lifetime.
+fn listen(app: &Shared, id: &str, event: &str, handler: impl Fn(&Shared) + 'static) -> Result<(), JsValue> {
+    let target = element(&app.document, id)?;
+    let owned = Rc::clone(app);
+    let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
+        handler(&owned);
+    });
+    target.add_event_listener_with_callback(event, callback.as_ref().unchecked_ref())?;
+    // A listener on a live element is owned by that element; forgetting the
+    // closure is what keeps it callable. The element outlives the closure.
+    callback.forget();
     Ok(())
 }
 
@@ -394,6 +472,55 @@ fn station_to_url(window: &Window, station: Option<&str>) {
     let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(&url.href()));
 }
 
+/// The modes a link asked for, or `None` to keep the defaults.
+fn modes_from_url(window: &Window) -> Option<ModeSet> {
+    let search: String = window.location().search().ok()?;
+    let params = web_sys::UrlSearchParams::new_with_str(search.trim_start_matches('?')).ok()?;
+    let raw = params.get(MODES_PARAM)?;
+    let mut modes = ModeSet::empty();
+    for name in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(mode) = Mode::from_api_name(name) {
+            modes.insert(mode);
+        }
+    }
+    // A parameter that selects nothing is a malformed link, not a request for
+    // an empty board; the defaults are a better answer than a blank screen.
+    (!modes.is_empty()).then_some(modes)
+}
+
+/// Put the mode switches in the query parameter, so a link carries what the
+/// reader chose to see.
+///
+/// This is what makes a filtered board shareable: "these are the bus stops near
+/// me" is a thing a reader sends to someone, and without it the link opens on
+/// whatever the reader's default was.
+fn modes_to_url(window: &Window, modes: ModeSet) {
+    let Ok(href) = window.location().href() else {
+        return;
+    };
+    let Ok(url) = web_sys::Url::new(&href) else {
+        return;
+    };
+    if modes == ModeSet::default_on() {
+        // The default is the absence of a parameter, so a link to a plain
+        // station board is short and does not change when the defaults do.
+        url.search_params().delete(MODES_PARAM);
+    } else {
+        let names: Vec<&str> = modes.active().iter().map(|mode| mode.api_name()).collect();
+        url.search_params().set(MODES_PARAM, &names.join(","));
+    }
+    if url.search() == "?" {
+        url.set_search("");
+    }
+    let Ok(history) = window.history() else {
+        return;
+    };
+    let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(&url.href()));
+}
+
+/// The query parameter the mode switches live in.
+const MODES_PARAM: &str = "modes";
+
 /// The page title, which carries the station so a reader with several boards
 /// open can tell them apart.
 fn set_title(app: &Shared, station: Option<&str>) {
@@ -409,73 +536,79 @@ fn set_title(app: &Shared, station: Option<&str>) {
 /// One request per line, all of them genuinely in flight at once, rather than
 /// the single 17 MB request the original made. See [`LINE_IDS`] for the
 /// measurements that decided it.
+/// Fetch every mode's stop points and build the station index.
+///
+/// One request per mode, all of them genuinely in flight at once. The `join_all`
+/// below is not a convenience: the two designs it replaced each looked right and
+/// were not — see its own comment. The requests are issued together, parsed
+/// straight from bytes, and merged by name so one interchange is one row with an
+/// id per mode.
 async fn load_stations(app: &Shared) {
-    // Every line is fetched, and the futures are awaited directly. Two earlier
-    // designs were wrong and both looked right:
-    //
-    // * Awaiting them one after another serialised the requests, which is the
-    //   one thing the per-line fetch was for.
-    // * Spawning each with `spawn_local` and then *polling a shared cell* until
-    //   every slot was filled locked the renderer. A microtask yield — a
-    //   resolved `Promise` awaited from Rust — does not hand control back to the
-    //   browser's event loop, so the polling loop starved the very tasks it was
-    //   waiting for, forever. The page hung, with no error, and the wasm was
-    //   doing exactly what it was told.
-    //
-    // What is needed is the two halves of `futures::join_all`, which this crate
-    // does not depend on and which is a few lines: poll each future once per
-    // turn, and await whatever is ready before polling again. `wasm_bindgen_
-    // futures` already polls the outer future on every microtask tick, so
-    // awaiting a single `join` future built from all twelve is both concurrent
-    // and non-blocking.
-    let requests: Vec<LineRequest> = LINE_IDS
+    let requests: Vec<ModeRequest> = FETCHED_MODES
         .iter()
-        .map(|line| {
-            let line: &str = line;
-            Box::pin(async move { (line, fetch_bytes(&line_url(line)).await) }) as LineRequest
+        .map(|mode| {
+            let mode = *mode;
+            Box::pin(async move { (mode, fetch_bytes(&mode_url(mode)).await) })
+                as ModeRequest
         })
         .collect();
-    let results: Vec<(&'static str, LineResult)> = join_all(requests).await;
+    let answers = join_all(requests).await;
 
-    let mut collected: Vec<StopPoint> = Vec::new();
-    let mut failed: Vec<&str> = Vec::new();
-    for (line, result) in &results {
-        match result {
-            Ok(bytes) => match serde_json::from_slice::<Vec<StopPoint>>(bytes) {
-                Ok(stops) => collected.extend(stops),
+    let mut per_mode: Vec<(Mode, Vec<StopPoint>)> = Vec::new();
+    let mut failed: Vec<&'static str> = Vec::new();
+    for (mode, answer) in answers {
+        match answer {
+            // The mode endpoint wraps its list in an object, `{"stopPoints":
+            // [...]}`, while the per-*line* endpoint returns a bare array and the
+            // search endpoint a `{"matches": [...]}` object. Three shapes, one
+            // code path, so the wrapper is peeled here rather than three times
+            // at the call site.
+            Ok(bytes) => match serde_json::from_slice::<StopPointList>(&bytes) {
+                Ok(list) => per_mode.push((mode, list.stop_points)),
                 Err(error) => {
-                    web_sys::console::error_1(&JsValue::from_str(&format!("{line}: {error}")));
-                    failed.push(line);
+                    warn_text(&format!("{mode:?}: {error}"));
+                    failed.push(mode.api_name());
                 }
             },
             Err(error) => {
-                web_sys::console::error_1(&JsValue::from_str(&format!("{line}: {error}")));
-                failed.push(line);
+                warn_text(&format!("{mode:?}: {error}"));
+                failed.push(mode.api_name());
             }
         }
     }
 
-    // Every line is fetched before anything is rendered, so the picker appears
-    // once and complete rather than filling in a station at a time.
-    let stations = station_list(collected);
+    let stations = station_index(per_mode);
     if stations.is_empty() {
         notice(app, STATIONS_FAILED);
         return;
     }
-    fill_picker(app, &stations);
-    notice(app, if failed.is_empty() { STATIONS_READY } else { PARTIAL });
+    let count = stations.len();
+    *app.stations.borrow_mut() = stations;
+    let _ = refresh_suggestions(app);
+    notice(
+        app,
+        if failed.is_empty() {
+            STATIONS_READY
+        } else {
+            PARTIAL
+        },
+    );
 
-    // The URL asks for a station. If the list has it, select it and load; if
-    // not, say so rather than silently showing a different one.
-    let Some(requested) = station_from_url(&app.window) else {
-        return;
-    };
-    if !stations.iter().any(|station| station.id == requested) {
-        notice(app, UNKNOWN_STATION);
-        return;
+    // The URL asks for a station. If the list has it, show it; if not, say so
+    // rather than silently showing a different one.
+    if let Some(requested) = station_from_url(&app.window) {
+        let known = app
+            .stations
+            .borrow()
+            .iter()
+            .any(|station| station.all_ids().any(|id| id == requested));
+        if known {
+            show_station(app, &requested);
+        } else {
+            notice(app, UNKNOWN_STATION);
+        }
     }
-    select(app, &requested);
-    app.load(&requested).await;
+    let _ = count;
 }
 
 /// Await every future concurrently, and return the results in order.
@@ -560,8 +693,32 @@ async fn yield_to_browser() {
 }
 
 /// The stop-point URL for one line id.
-fn line_url(line: &str) -> String {
-    LINE_STOPS_URL.replace("{line}", line)
+fn mode_url(mode: Mode) -> String {
+    MODE_STOPS_URL.replace("{mode}", mode.api_name())
+}
+
+/// The search URL for what a reader has typed.
+fn search_url(query: &str) -> String {
+    format!("{SEARCH_BASE}{}", encode_uri_component(query))
+}
+
+/// Percent-encode a query for a URL path segment.
+///
+/// Written out rather than pulled in, because it is one small function and the
+/// crate has no HTTP dependency. Unreserved characters pass through; everything
+/// else becomes UTF-8 percent-encoded, which is what a path segment needs for
+/// "King's Cross" and "St. Pancras".
+fn encode_uri_component(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 /// One `Arrival`, as TfL sends it.
@@ -633,77 +790,398 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 
 
 /// The picker changed: take the new station, remember it, and show it.
-fn on_change(app: &Shared) {
-    let id = app.select.value();
-    if id.is_empty() {
-        // The original's empty-selection branch: clear the timer, take the
-        // station out of the URL, put the title back, and say so.
-        app.stop_timer();
-        *app.selected.borrow_mut() = None;
-        station_to_url(&app.window, None);
-        set_title(app, None);
-        say(&app.departures, NO_STATION);
+/// Draw the mode toggles.
+///
+/// One button per mode, showing whether it is on. They are real `<button>`
+/// elements with `aria-pressed` rather than styled divs, so a keyboard reaches
+/// them, a screen reader announces the state, and Enter works without a click
+/// handler on a non-interactive element.
+///
+/// The colour is the mode's own, and the label sits on it in whichever of black
+/// or white is legible — the same rule the line chips use, from the same
+/// function, so no colour on this page is picked by eye.
+fn build_toggles(app: &Shared) -> Result<(), JsValue> {
+    let root = &app.toggles;
+    clear(root);
+    let modes = *app.modes.borrow();
+    for mode in crate::modes::MODES {
+        let on = modes.contains(*mode);
+        let button = element_of(root, "button");
+        let colour = mode.colour();
+        let _ = button.set_attribute("type", "button");
+        let _ = button.set_attribute("class", if on { "toggle on" } else { "toggle" });
+        let _ = button.set_attribute("aria-pressed", if on { "true" } else { "false" });
+        let _ = button.set_attribute(
+            "style",
+            &format!("--chip: {colour}; --chip-ink: {};", line_ink(colour)),
+        );
+        button.set_text_content(Some(&format!(
+            "{} {}",
+            mode.glyph(),
+            mode.label()
+        )));
+        let _ = button.set_attribute("data-mode", mode.api_name());
+
+        let owned = Rc::clone(app);
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
+            toggle_mode(&owned, *mode);
+        });
+        button.add_event_listener_with_callback("click", callback.as_ref().unchecked_ref())?;
+        callback.forget();
+        root.append_child(&button).expect("append a mode toggle");
+    }
+    Ok(())
+}
+
+/// Switch a mode on or off, and re-draw everything that depends on it.
+///
+/// Switching a mode off must not lose the station on the board when that station
+/// is still served by another mode that is on, and it must say so when it is
+/// not — a reader who turns the Underground off while looking at Acton Town
+/// would otherwise be left staring at a board they have switched off.
+fn toggle_mode(app: &Shared, mode: Mode) {
+    let mut modes = *app.modes.borrow();
+    if modes.contains(mode) {
+        // Refusing to switch the last mode off is deliberate: a board with no
+        // modes is not a state a reader can get anything from, and an empty
+        // screen looks broken rather than chosen.
+        if modes.active().len() == 1 {
+            notice(app, NO_MODES_LEFT);
+            return;
+        }
+        modes.remove(mode);
+    } else {
+        modes.insert(mode);
+    }
+    *app.modes.borrow_mut() = modes;
+
+    if build_toggles(app).is_err() {
         return;
     }
+    let _ = refresh_suggestions(app);
+    modes_to_url(&app.window, modes);
+
+    // If the station on the board is still reachable, refresh it; if not, say so
+    // and clear the board rather than showing a station that is now filtered out.
+    if let Some(id) = app.selected.borrow().clone() {
+        let still = app
+            .stations
+            .borrow()
+            .iter()
+            .any(|station| station.all_ids().any(|candidate| *candidate == id));
+        if still {
+            let owned = Rc::clone(app);
+            let station_id = id.clone();
+            spawn_local(async move {
+                owned.load(&station_id).await;
+            });
+        } else {
+            app.stop_timer();
+            *app.selected.borrow_mut() = None;
+            say(&app.heading, "");
+            say(&app.departures, STATION_FILTERED_OUT);
+        }
+    }
+}
+
+/// Redraw the suggestion list from the current search text and mode switches.
+fn refresh_suggestions(app: &Shared) -> Result<(), JsValue> {
+    let query = app.search.value();
+    let root = &app.results;
+    clear(root);
+    let modes = *app.modes.borrow();
+
+    // With no query, offer the first few stations rather than nothing: a reader
+    // who has not typed yet should see that the board is ready and what it
+    // offers.
+    // The suggestions are owned rather than borrowed: a `Ref` held across the
+    // rendering below would be a runtime borrow panic the moment anything
+    // touched the list, and the data is a handful of small structs.
+    let stations = app.stations.borrow();
+    let shown: Vec<Station> = if query.trim().is_empty() {
+        stations.iter().take(6).cloned().collect()
+    } else {
+        Search::new(&stations).query(&query, modes).into_iter().cloned().collect()
+    };
+    drop(stations);
+
+    if shown.is_empty() {
+        if !query.trim().is_empty() {
+            paragraph(root, NO_MATCH);
+        }
+        return Ok(());
+    }
+    for station in shown {
+        let id = match station.id_for(modes).or_else(|| station.all_ids().next()) {
+            Some(id) => id.to_string(),
+            None => continue,
+        };
+        let row = element_of(root, "button");
+        let _ = row.set_attribute("type", "button");
+        let _ = row.set_attribute("class", "result");
+        row.set_text_content(Some(&station.name));
+
+        // The mode chips on the row, so an interchange shows what it connects
+        // before it is chosen rather than after.
+        for mode in &station.ids {
+            let chip = element_of(&row, "span");
+            let colour = mode.0.colour();
+            let _ = chip.set_attribute("class", "chip small");
+            let _ = chip.set_attribute(
+                "style",
+                &format!("--chip: {colour}; --chip-ink: {};", line_ink(colour)),
+            );
+            chip.set_text_content(Some(mode.0.short_label()));
+        }
+        if let Some(locality) = &station.locality {
+            let where_ = element_of(&row, "span");
+            let _ = where_.set_attribute("class", "locality");
+            where_.set_text_content(Some(locality));
+        }
+
+        let owned = Rc::clone(app);
+        let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
+            let app = Rc::clone(&owned);
+            // Cloned inside the closure, not moved into it: a closure that takes
+            // its captured value is `FnOnce`, and a listener has to be `FnMut`
+            // because it fires as many times as the reader clicks.
+            let id = id.clone();
+            spawn_local(async move {
+                show_station_by_id(&app, &id).await;
+            });
+        });
+        row.add_event_listener_with_callback("click", callback.as_ref().unchecked_ref())?;
+        callback.forget();
+        root.append_child(&row).expect("append a suggestion");
+    }
+    Ok(())
+}
+
+/// A reader typed something: debounce, then either filter the local list or ask
+/// TfL for bus stops the local list does not have.
+fn on_typing(app: &Shared) {
+    // Editing the search brings the suggestions back; choosing one hid them.
+    let _ = app
+        .document
+        .body()
+        .map(|body| body.set_class_name(""));
+    let query = app.search.value();
+    let modes = *app.modes.borrow();
+    let needs_network = query.trim().len() >= MIN_SEARCH_CHARS
+        && modes.contains(Mode::Bus)
+        && !*app.searching.borrow();
+
+    // Always filter what is already loaded: it is instant, and it is the answer
+    // for every mode except buses.
+    let _ = refresh_suggestions(app);
+    if needs_network {
+        debounce_search(app);
+    }
+}
+
+/// Search TfL once the reader has stopped typing.
+///
+/// The delay is what turns "barking" — seven keystrokes — into one request
+/// rather than seven. Without it the search endpoint sees every prefix of every
+/// word, which is both slow and a good way to get rate limited.
+///
+/// The pending query is *stored* rather than captured, and one long-lived timer
+/// reads it. Capturing the query in the timer's closure would make that closure
+/// `FnOnce` — it would move the string in — and a closure handed to
+/// `setTimeout` has to be `FnMut`, because the browser is free to call it more
+/// than once over a page's life if the handle is ever reused.
+fn debounce_search(app: &Shared) {
+    *app.pending_query.borrow_mut() = app.search.value();
+
+    // Cancel anything already waiting, so only the last keystroke survives.
+    let previous = app.debounce.replace(None);
+    if let Some(handle) = previous {
+        app.window.clear_timeout_with_handle(handle);
+    }
+
+    // The closure owns its own `Rc`: `setTimeout` needs a `'static` callback and
+    // the app outlives it. It reads the pending query and the current modes
+    // through that `Rc`, so a search always uses the modes as they are when the
+    // timer fires rather than as they were when it was scheduled.
+    let app_ref: Shared = Rc::clone(app);
+    let callback = Closure::<dyn FnMut()>::new(move || {
+        let query = app_ref.pending_query.borrow().clone();
+        let modes = *app_ref.modes.borrow();
+        spawn_search(&app_ref, query, modes);
+    });
+    let handle = app
+        .window
+        .set_timeout_with_callback_and_timeout_and_arguments_0(
+            callback.as_ref().unchecked_ref(),
+            SEARCH_DEBOUNCE_MS,
+        )
+        .expect("the search debounce");
+    *app.debounce.borrow_mut() = Some(handle);
+    callback.forget();
+}
+
+/// Ask TfL for stops matching what was typed, and add them to the list.
+///
+/// This is the only route to a **bus** stop: `StopPoint/Mode/bus` is an HTTP
+/// 400, so there is no list to download and search is the only way in. The
+/// results are merged into the station list, so they are searchable afterwards
+/// rather than being a one-off suggestion the reader has to catch.
+fn spawn_search(app: &Shared, query: String, modes: ModeSet) {
+    *app.searching.borrow_mut() = true;
+    notice(app, SEARCHING);
     let owned = Rc::clone(app);
-    select(app, &id);
     spawn_local(async move {
-        owned.load(&id).await;
+        let found = search_stops(&query).await;
+        *owned.searching.borrow_mut() = false;
+        if found.is_empty() {
+            return;
+        }
+        {
+            let mut stations = owned.stations.borrow_mut();
+            // Keep what is already there, and add only the stops that are new.
+            let mut known: Vec<String> = stations
+                .iter()
+                .flat_map(|station| station.all_ids().map(str::to_string))
+                .collect();
+            for stop in found {
+                if !known.contains(&stop.id) {
+                    known.push(stop.id.clone());
+                    stations.push(Station {
+                        ids: vec![(stop.mode, stop.id)],
+                        name: stop.name,
+                        locality: stop.locality,
+                        modes: stop.modes,
+                    });
+                }
+            }
+            // Re-sort so a newly found stop appears where a reader expects it
+            // rather than at the end of the list, where it would look broken.
+            stations.sort_by(|a, b| {
+                a.name
+                    .to_lowercase()
+                    .cmp(&b.name.to_lowercase())
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+        }
+        let _ = refresh_suggestions(&owned);
+        // The notice goes back to whatever the last station fetch left, since
+        // the search is an addition to the board rather than a state of it.
+        let _ = modes;
     });
 }
 
-/// Fill the picker with the stations, in the order the domain sorted them.
-///
-/// The empty first option is the original's "Select a station", and it stays:
-/// it is how the reader gets back to no station at all, which the change
-/// handler treats as a real state — the timer stops, the URL is cleared and the
-/// title goes back to plain "London Rura".
-fn fill_picker(app: &Shared, stations: &[Station]) {
-    let document = app.document.clone();
-    // Options are rebuilt, not appended to, so a reload cannot double the list.
-    while app.select.length() > 1 {
-        app.select.remove_with_index(1);
-    }
-    for station in stations {
-        let option = document
-            .create_element("option")
-            .expect("an <option> element");
-        let option: HtmlOptionElement = option
-            .dyn_into()
-            .expect("an <option> element");
-        option.set_value(&station.id);
-        option.set_text(&station.name);
-        app.select
-            .add_with_html_option_element(&option)
-            .expect("add a station");
-    }
-    *app.stations.borrow_mut() = stations.to_vec();
+/// Ask TfL's search endpoint for stops matching a query.
+async fn search_stops(query: &str) -> Vec<FoundStop> {
+    let bytes = match fetch_bytes(&search_url(query)).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            warn_text(&format!("search {query}: {error}"));
+            return Vec::new();
+        }
+    };
+    let response: SearchResponse = match serde_json::from_slice(&bytes) {
+        Ok(response) => response,
+        Err(error) => {
+            warn_text(&format!("search {query}: {error}"));
+            return Vec::new();
+        }
+    };
+    response
+        .matches
+        .into_iter()
+        .filter(|m| m.stop_point_id.is_some())
+        .map(|m| FoundStop {
+            id: m.stop_point_id.unwrap_or_default(),
+            name: m.name.clone(),
+            locality: m.locality,
+            mode: Mode::Bus,
+            modes: ModeSet::default(),
+        })
+        .collect()
 }
 
-/// Record the selection, put it in the URL, title it, and start its timer.
-fn select(app: &Shared, id: &str) {
-    // Select by index rather than by value: setting a value the list does not
-    // have silently leaves the picker on the first entry, which is how the
-    // original could show one station while the URL named another. The caller
-    // has already checked the id is in the list.
-    if let Some(index) = app
-        .stations
-        .borrow()
-        .iter()
-        .position(|station| station.id == id)
-    {
-        app.select.set_selected_index(index as i32);
+/// A stop the search endpoint found.
+struct FoundStop {
+    id: String,
+    name: String,
+    locality: Option<String>,
+    mode: Mode,
+    modes: ModeSet,
+}
+
+/// The `StopPoint/Search` response, as TfL sends it.
+#[derive(serde::Deserialize)]
+struct SearchResponse {
+    #[serde(default)]
+    matches: Vec<SearchMatch>,
+}
+
+/// One entry in the search response.
+///
+/// The id is optional because TfL returns some matches — bus *routes*, and
+/// lines — that are not stop points and so have nothing to request arrivals for.
+/// Those are dropped rather than offered as stations that show no board.
+#[derive(serde::Deserialize)]
+struct SearchMatch {
+    #[serde(rename = "stopPointId")]
+    stop_point_id: Option<String>,
+    #[serde(default)]
+    name: String,
+    #[serde(rename = "localityName", default)]
+    locality: Option<String>,
+}
+
+/// The reader pressed Enter: take the first suggestion, if there is one.
+fn on_submit(app: &Shared) {
+    let first = app
+        .results
+        .first_element_child()
+        .map(|row| row.text_content().unwrap_or_default());
+    if let Some(name) = first {
+        let _ = name;
+        // The row's own click handler does the work; synthesising the click keeps
+        // one code path for choosing a station.
+        let _ = app.results.first_element_child().map(|row| {
+            if let Ok(event) = web_sys::MouseEvent::new("click") {
+                let _ = row.dispatch_event(&event);
+            }
+        });
     }
+}
+
+/// Show a station's board, by stop-point id.
+async fn show_station_by_id(app: &Shared, id: &str) {
+    show_station(app, id);
+}
+
+/// Show a station's board.
+///
+/// `id` is a stop-point id, which is what the URL carries and what the search
+/// results hand back. The station's name is looked up from the list so the title
+/// and the heading say what a reader recognises rather than what the API calls it.
+fn show_station(app: &Shared, id: &str) {
+    // The suggestion list is dismissed rather than left under the board: it is
+    // the largest thing on the page once a station is chosen.
+    let _ = app
+        .document
+        .body()
+        .map(|body| body.set_class_name("chosen"));
     let name = app
         .stations
         .borrow()
         .iter()
-        .find(|station| station.id == id)
+        .find(|station| station.all_ids().any(|candidate| candidate == id))
         .map(|station| station.name.clone());
     *app.selected.borrow_mut() = Some(id.to_string());
     station_to_url(&app.window, Some(id));
     set_title(app, name.as_deref());
+    say(&app.heading, name.as_deref().unwrap_or(""));
     app.start_timer();
+    let owned = Rc::clone(app);
+    let station_id = id.to_string();
+    spawn_local(async move {
+        owned.load(&station_id).await;
+    });
 }
 
 /// How long ago the board was last fetched, in words.
@@ -742,67 +1220,110 @@ fn updated_ago(app: &Shared) -> String {
 /// one accessibility gap in a board whose whole signal is colour.
 fn paint(app: &Shared, board: &Board) {
     let root = &app.departures;
-    // Clear without `innerHTML`: these are elements, not a string to parse.
-    while let Some(child) = root.first_child() {
-        root.remove_child(&child).expect("remove a rendered child");
-    }
+    clear(root);
+    say(&app.stamp, &updated_ago(app));
     if board.is_empty() {
         paragraph(root, EMPTY);
         return;
     }
     heading(root, 2, "Departures by Platform");
-    // A board of minutes is only as true as the fetch behind it. Saying when
-    // that was costs one line and is the difference between a board that is
-    // quiet and a board that is stale.
-    let stamp = element_of(root, "p");
-    let _ = stamp.set_attribute("class", "stamp");
-    stamp.set_text_content(Some(&updated_ago(app)));
-    root.append_child(&stamp).expect("stamp");
+
+    // One column header for the whole board, not one per platform. A platform
+    // heading repeated above every table with its own LINE/DESTINATION/MIN header
+    // is the single biggest waste of vertical space on a board, and the columns
+    // do not change between platforms.
+    let columns = element_of(root, "table");
+    let head = element_of(root, "thead");
+    let head_row = element_of(root, "tr");
+    cell(&head_row, "Line", "th");
+    cell(&head_row, "Destination", "th");
+    cell(&head_row, "Min", "th");
+    head.append_child(&head_row).expect("head row");
+    columns.append_child(&head).expect("head");
+    root.append_child(&columns).expect("column header");
+
     for platform in &board.platforms {
-        heading(root, 3, &platform.name);
+        // The platform name goes in the heading only when there is more than one
+        // to tell apart. "Platform 1" as a heading above "Platform 1" is a label
+        // for nothing, and a board that spends 24px on it has 24px fewer for
+        // trains.
+        if board.platforms.len() > 1 {
+            heading(root, 3, &platform.name);
+        }
         let table = element_of(root, "table");
-        let head = element_of(root, "thead");
-        let head_row = element_of(root, "tr");
-        cell(&head_row, "Line", "th");
-        cell(&head_row, "Destination", "th");
-        cell(&head_row, "Arrival (min)", "th");
-        head.append_child(&head_row).expect("head row");
-        table.append_child(&head).expect("head");
         let body = element_of(root, "tbody");
         for departure in &platform.departures {
             let row = element_of(root, "tr");
 
-            // The line's name, on a chip of the line's own published colour, in
-            // whichever of black or white `line_ink` says is legible on it.
-            // The chip is a `<span>` inside a plain cell, because a rounded
-            // background on the cell itself would be rounded by the table too.
+            // The line's name on a chip of the line's own published colour, in
+            // whichever of black or white is legible on it. The colour and the
+            // ink are set as custom properties and the stylesheet consumes them,
+            // so no colour is written in two places and the chip picks up the
+            // shape and the ring from one rule.
+            let colour = line_colour(&departure.line);
             let line_cell = element_of(root, "td");
             let chip = element_of(root, "span");
-            let colour = line_colour(&departure.line);
+            let _ = chip.set_attribute("class", "chip");
             let _ = chip.set_attribute(
                 "style",
-                &format!("background-color: {colour}; color: {};", line_ink(colour)),
+                &format!("--chip: {colour}; --chip-ink: {};", line_ink(colour)),
             );
-            // `data-line` names the line in the markup as well, so a reader
-            // using a stylesheet or a high-contrast mode still gets the words.
+            // The name is text on the chip, not the chip's colour: the board is
+            // readable when the colour cannot be seen.
             let _ = chip.set_attribute("data-line", &departure.line);
             chip.set_text_content(Some(&departure.line));
             line_cell.append_child(&chip).expect("line chip");
             row.append_child(&line_cell).expect("line cell");
 
-            cell(&row, &departure.destination, "td");
+            // TfL sends an empty `destinationName` for some services. A blank
+            // cell reads as a rendering failure; a dash reads as "no destination
+            // given", which is what it is.
+            let destination = cell(
+                &row,
+                if departure.destination.trim().is_empty() {
+                    NO_DESTINATION
+                } else {
+                    &departure.destination
+                },
+                "td",
+            );
+            let _ = destination.set_attribute("class", "destination");
 
-            // Zero minutes means the train is at the platform, which is not the
-            // same as "no time" — it is the thing the reader is waiting for, so
-            // it is marked rather than left to look like an empty value.
-            let minutes = cell(&row, &departure.minutes.to_string(), "td");
-            if departure.minutes <= 0 {
-                let _ = minutes.set_attribute("class", "due");
-            }
+            // Zero or fewer minutes means the train is at the platform, which is
+            // not the same as "no time" — it is the thing the reader is waiting
+            // for, so it gets its own colour rather than reading as a blank.
+            let due = departure.minutes <= 0;
+            let minutes = cell(
+                &row,
+                &if due {
+                    if departure.minutes == 0 {
+                        "due".to_string()
+                    } else {
+                        departure.minutes.to_string()
+                    }
+                } else {
+                    departure.minutes.to_string()
+                },
+                "td",
+            );
+            let _ = minutes.set_attribute(
+                "class",
+                if due { "minutes due" } else { "minutes" },
+            );
             body.append_child(&row).expect("row");
         }
         table.append_child(&body).expect("body");
         root.append_child(&table).expect("table");
+    }
+}
+
+/// Empty an element of its children, without `innerHTML`.
+///
+/// The board builds elements rather than parsing a string, so it clears them the
+/// same way: a child is a node to be removed, not markup to be re-interpreted.
+fn clear(root: &Element) {
+    while let Some(child) = root.first_child() {
+        root.remove_child(&child).expect("remove a rendered child");
     }
 }
 
@@ -969,6 +1490,12 @@ fn script_belongs_to_app(script: &str, ours: &str) -> bool {
 /// Report something recoverable. Never a panic, never silent — but never a
 /// status line either, because nothing `ui.rs` writes to `#notice` is about the
 /// app's own plumbing.
+/// Log a message that is not an error value: a failed request's reason is text
+/// the app assembled, not a `JsValue` the browser threw.
+fn warn_text(message: &str) {
+    warn(message, JsValue::from_str(message));
+}
+
 fn warn(context: &str, error: JsValue) {
     web_sys::console::warn_2(&JsValue::from_str(context), &error);
 }

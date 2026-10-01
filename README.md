@@ -2,7 +2,9 @@
 
 A London Underground departures board for every station on the TfL network.
 Pick a station and it lists the next trains from each platform, colour-coded by
-line, refreshed every thirty seconds from the live TfL API.
+line, refreshed every thirty seconds from the live TfL API. It covers the
+Underground, the Elizabeth line, the Overground, the DLR, buses, the cable car,
+cycles and the river, and you choose which of them to show.
 
 The whole board is a browser app written in Rust and compiled to WebAssembly.
 There is no server, no account, and nothing stored: the only network traffic is
@@ -45,13 +47,17 @@ or the bindings generator, and needs no network.
 `start_url` is `"./"`. Any file host will do — nginx, Caddy, GitHub Pages,
 `python3 -m http.server`.
 
+## Modes
+
+Eight modes, switchable from the header and remembered in the link: Underground,
+Elizabeth line, Overground, DLR, Buses, Cable car, Cycles, River. Search across
+all of them, or type a street name to find the bus stops on it.
+
 ## Stations
 
-The station list comes from twelve small requests — one per line — rather than
-the single 17 MB request the original made. The same 270 stations, 81% fewer
-bytes, and the largest thing the browser has to parse is one line instead of
-the whole network. Stations on several lines arrive more than once and are
-deduplicated. The measurements are in `AGENTS.md`.
+The station list comes from one request per mode rather than the single 17 MB
+request the original made, and the stations are merged by name so an interchange
+is one row with an id per mode. The measurements are in `AGENTS.md`.
 
 ## Checking it actually works
 

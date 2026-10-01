@@ -13,75 +13,109 @@
 //! the request itself and the DOM it renders into. It feeds this module the
 //! deserialised JSON and renders what comes back, so the two cannot drift.
 
-/// The per-line stop-point endpoint. `{line}` is a line id from [`LINE_IDS`].
+use crate::modes::{Mode, ModeSet};
+
+/// The stop-point list for one mode. `{mode}` is a [`Mode::api_name`].
 ///
-/// This is what replaced the single mode request, for the reason set out on
-/// [`LINE_IDS`].
-pub const LINE_STOPS_URL: &str = "https://api.tfl.gov.uk/Line/{line}/StopPoints";
+/// This is the big one, and it is why the board fetches per mode. Measured on
+/// 2026-09-30, uncompressed:
+///
+/// | mode | bytes | named stops |
+/// |---|---|---|
+/// | `tube` | 16,228,451 | 1,751 |
+/// | `overground` | 3,110,679 | 547 |
+/// | `dlr` | 1,373,727 | 274 |
+/// | `elizabeth-line` | 945,904 | 119 |
+/// | `cable-car` | 117,455 | 8 |
+///
+/// `?detail=false` is accepted and does essentially nothing — it saved eleven
+/// bytes on the tube response — so the way to make this affordable is to ask for
+/// a smaller *slice* of the network, not for less detail.
+pub const MODE_STOPS_URL: &str = "https://api.tfl.gov.uk/StopPoint/Mode/{mode}";
+
+/// The arrivals endpoint for one stop point. `{id}` is a stop-point id.
+pub const ARRIVALS_URL: &str = "https://api.tfl.gov.uk/StopPoint/{id}/Arrivals";
+
+/// The name-search endpoint, used when a reader types a station or street name.
+///
+/// `StopPoint/Search/{query}` returns a `matches` array of `{id, name, modes}`,
+/// and it is the only way to reach a **bus** stop: `StopPoint/Mode/bus` is an
+/// HTTP 400, and a bus stop's id (`490000…`, `490G000…`, `400G…`) is not
+/// derivable from anything a reader can see. Measured: `490000173RC` returns 13
+/// live arrivals with real route numbers, while a `490G000…` id returns none.
+pub const SEARCH_URL: &str = "https://api.tfl.gov.uk/StopPoint/Search/{query}";
 
 /// The base the arrivals URL hangs off, so the id can be substituted without
 /// pulling the whole template around.
 pub const ARRIVALS_BASE: &str = "https://api.tfl.gov.uk/StopPoint/";
 
-/// Every line whose stations the board offers, in the order they are fetched.
+/// The base the search URL hangs off.
+pub const SEARCH_BASE: &str = "https://api.tfl.gov.uk/StopPoint/Search/";
+
+/// The modes whose stop points are fetched up front, in fetch order.
 ///
-/// Eleven Underground lines plus the Elizabeth line — the ids
-/// `Line/Mode/tube` and `Line/Mode/elizabeth-line` return, hard coded.
-///
-/// **Why not the one big request.** The original app asked for
-/// `StopPoint/Mode/tube,elizabeth-line` in a single call, and that endpoint
-/// answers with **16,958,009 bytes** — 17 MB of JSON for 1,858 stop points,
-/// of which 270 are stations. Almost all of it is two fields the board never
-/// reads: `children` (9.0 MB) and `additionalProperties` (7.1 MB), together
-/// 95% of the payload. `?detail=false` is accepted and does essentially
-/// nothing — it returned 16,957,998 bytes, a 0.0001% saving — and there is no
-/// smaller station-list endpoint.
-///
-/// Fetching `Line/<id>/StopPoints` for the twelve lines instead returns the
-/// **same 270 stations** — verified by diffing the two sets, which are
-/// identical — in 3,255,303 bytes across twelve requests, an 81% reduction, and
-/// the largest single response is one line's rather than the whole network's.
-/// A station on three lines appears in three responses and is deduplicated
-/// here.
-///
-/// The cost is twelve round trips instead of one, and they are issued
-/// concurrently, so the wall-clock difference is small. What it buys is a
-/// payload the UI thread can parse without freezing, and a failure that costs
-/// one line rather than the whole picker. The trade is deliberate: for a list
-/// this static, twelve small requests beat one large one.
-pub const LINE_IDS: &[&str] = &[
-    "bakerloo",
-    "central",
-    "circle",
-    "district",
-    "hammersmith-city",
-    "jubilee",
-    "metropolitan",
-    "northern",
-    "piccadilly",
-    "victoria",
-    "waterloo-city",
-    "elizabeth",
+/// The four rail modes and the cable car. **Not** the bus: `StopPoint/Mode/bus`
+/// is an HTTP 400, so there is nothing to fetch, and there are ~19,000 bus stops
+/// in London against 270 Underground stations — a picker of bus stops is not a
+/// departures board. Buses are reached by search instead, which is how a reader
+/// who wants "the 88 from here" would actually look one up.
+pub const FETCHED_MODES: &[Mode] = &[
+    Mode::Tube,
+    Mode::Elizabeth,
+    Mode::Overground,
+    Mode::Dlr,
+    Mode::Cable,
 ];
 
-/// The TfL stop-point id prefixes that are real stations on the board.
+/// What a station looks like on the board.
 ///
-/// The mode endpoint also returns stop points that are not stations — the
-/// entrances, the interchanges' unnamed legs, the `940GZZ...` virtual stop
-/// points. `940GZZLU` is the London Underground prefix and `940GZZCR` is
-/// central London, and a stop point whose id starts with one of the two is
-/// something a passenger can actually choose. The original app expressed this
-/// as an unanchored regular expression, `/(940GZZLU|940GZZCR)/`, matched
-/// anywhere in the id; the anchors here do not change which ids pass, because
-/// every such prefix occurs at the start of an id and nowhere else.
-pub const STATION_ID_PREFIXES: &[&str] = &["940GZZLU", "940GZZCR"];
-
-/// What a station looks like on the board: its id, which is what every other
-/// request keys off, and its display name, which is what the reader reads.
+/// One row, one place, however many modes serve it. That is the difference from
+/// the previous version, which carried a single id per station and so could only
+/// ever show one mode's board for an interchange.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Station {
-    pub id: String,
+    /// The stop-point id to request arrivals for, per mode.
+    ///
+    /// One station has several stop-point ids, because TfL models a station as a
+    /// set of stop points and each mode hangs off a different one: Paddington is
+    /// `940GZZLUPA` for the Bakerloo, the Circle and the Hammersmith & City,
+    /// `910GABWDXR` for the Elizabeth line, and a dozen bus stops in the station
+    /// forecourt besides. Requesting the Underground's id for the Elizabeth
+    /// line returns **zero** arrivals — measured, not assumed — so one id per
+    /// station would show an interchange as permanently half-empty.
+    pub ids: Vec<(Mode, String)>,
     pub name: String,
+    /// Where the station is, when TfL says. Used to tell apart the several bus
+    /// stops that share a street name.
+    pub locality: Option<String>,
+    /// The modes this station is served by.
+    pub modes: ModeSet,
+}
+
+impl Station {
+    /// The id to request arrivals for, given which modes are on.
+    ///
+    /// The enabled mode earliest in [`crate::modes::MODES`], so a reader who has
+    /// everything on sees the Underground's board for an interchange and a
+    /// reader who has only buses on sees the buses. `None` when no enabled mode
+    /// serves this station, which is how the picker filters it out.
+    pub fn id_for(&self, enabled: ModeSet) -> Option<&str> {
+        self.ids
+            .iter()
+            .filter(|(mode, _)| enabled.contains(*mode))
+            .min_by_key(|(mode, _)| position(*mode))
+            .map(|(_, id)| id.as_str())
+    }
+
+    /// Every id this station has, for fetching a board that spans modes.
+    pub fn all_ids(&self) -> impl Iterator<Item = &str> {
+        self.ids.iter().map(|(_, id)| id.as_str())
+    }
+
+    /// Whether any enabled mode serves this station.
+    pub fn serves(&self, enabled: ModeSet) -> bool {
+        self.ids.iter().any(|(mode, _)| enabled.contains(*mode))
+    }
 }
 
 /// One upcoming arrival, as far as this app cares: which line, where it is
@@ -269,20 +303,55 @@ pub fn contrast_ratio(a: &str, b: &str) -> f64 {
     (lighter + 0.05) / (darker + 0.05)
 }
 
-/// Whether a stop point is a station a passenger can pick.
+/// Whether a stop point is worth offering a reader.
 ///
-/// Both halves matter and both are the original's: the stop needs a
-/// `commonName` to have anything to show, and its id has to start with one of
-/// [`STATION_ID_PREFIXES`]. TfL sends `commonName: null` for the unnamed legs
-/// of an interchange, and those legs carry the same id shape as the station
-/// they belong to — so filtering on the id alone fills the picker with blanks,
-/// and filtering on the name alone fills it with the stops nobody can board.
-pub fn is_station(id: &str, common_name: Option<&str>) -> bool {
-    let named = common_name.is_some_and(|name| !name.is_empty());
-    let underground = STATION_ID_PREFIXES
-        .iter()
-        .any(|prefix| id.starts_with(prefix));
-    named && underground
+/// A name is the only requirement now, and dropping the id check is the whole
+/// point of this rewrite.
+///
+/// The previous filter also required the id to start with `940GZZLU` or
+/// `940GZZCR`, which is a filter for *the Underground* wearing the costume of a
+/// filter for *a station*. It discarded the Elizabeth line (`910G…`), the
+/// Overground (`910G…`), the DLR (`940GZZDL…`) and the cable car — silently, with
+/// no error anywhere — while the app's own request asked for
+/// `tube,elizabeth-line` and threw the Elizabeth line stops away.
+///
+/// `commonName: null` is the check that still earns its place. TfL sends it for
+/// the unnamed legs of an interchange, and those legs carry their station's own
+/// id shape, so without this the picker fills with rows that have no name.
+pub fn is_station(common_name: Option<&str>) -> bool {
+    common_name.is_some_and(|name| !name.is_empty())
+}
+
+/// Whether an id is one the arrivals endpoint will answer for.
+///
+/// Measured, and it is not the whole namespace. A stop point like Amersham
+/// appears in the mode response twice: as `940GZZLUAMS`, which returns four live
+/// Metropolitan trains, and as `0400ZZLUAMS0`, which returns **none** — an empty
+/// array, HTTP 200, no error. The outer-zone and stop-number-suffixed ids
+/// (`0400ZZ…`, `2100ZZ…`, `4900ZZ…`, anything ending in a digit after position
+/// nine) sit in the same responses and behave the same way.
+///
+/// So an id appearing in a stop-point list is no evidence that it is worth
+/// requesting, and taking the first one a response happens to list produces a
+/// station that looks listed and shows no trains at all. That failure mode is
+/// what this predicate exists to prevent, and it is a rule learned by measuring
+/// the endpoint rather than read off a document.
+pub fn is_requestable(id: &str) -> bool {
+    id.starts_with("940GZZ") || id.starts_with("910G")
+}
+
+/// The modes TfL says a stop point is served by, mapped onto this app's set.
+///
+/// A mode this app does not know is ignored rather than fatal: TfL's mode list
+/// grows, and an unknown entry should narrow nothing rather than break the list.
+pub fn modes_of(names: &[String]) -> ModeSet {
+    let mut set = ModeSet::empty();
+    for name in names {
+        if let Some(mode) = Mode::from_api_name(name) {
+            set.insert(mode);
+        }
+    }
+    set
 }
 
 /// The stations to offer, in the order to offer them.
@@ -294,65 +363,232 @@ pub fn is_station(id: &str, common_name: Option<&str>) -> bool {
 /// pin down: it is a case-insensitive comparison with ties broken on the exact
 /// code points, so "Acton Town" and "Acton Warren" keep a stable order and the
 /// result does not depend on the machine the tests run on.
-/// A stop point exactly as TfL sends it: an id, and a name that may be absent.
-///
-/// This is the unfiltered input. [`station_list`] decides which of these are
-/// stations; keeping the optional name here is what lets the filter reject the
-/// unnamed legs of an interchange, which arrive with the station's own id and
-/// would otherwise be indistinguishable from the station.
+/// A stop point exactly as TfL sends it, from one mode's response.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
 pub struct StopPoint {
     /// The field is `id`, not `stopPointId`.
     ///
     /// The stop-point list and the arrivals list disagree about this, and that
-    /// is the whole trap. `StopPoint/...` sends `"id"`; a `TflArrival` sends
+    /// is the whole trap. `StopPoint/…` sends `"id"`; a `TflArrival` sends
     /// `"stationName"`, `"platformName"` and no id at all; and the *older* TfL
     /// Unified API documentation shows a `stopPointId` that the live endpoint
-    /// does not send. Renaming this to `stopPointId` is the single change that
-    /// leaves the picker silently empty forever: every stop point deserialises
-    /// with an empty id, every id fails the prefix test, and the board offers
-    /// nothing while reporting no error at all.
+    /// does not send — of 1,858 stop points, **zero** carry it. Renaming this to
+    /// `stopPointId` leaves every id an empty string and the picker permanently
+    /// empty, reporting no error anywhere.
     #[serde(rename = "id", default)]
     pub id: String,
     #[serde(rename = "commonName", default)]
     pub name: Option<String>,
+    /// The modes TfL says this stop point is served by. Empty on some responses,
+    /// in which case the mode that produced the response is used.
+    #[serde(default)]
+    pub modes: Vec<String>,
+    /// The neighbourhood, when TfL knows one.
+    #[serde(rename = "localityName", default)]
+    pub locality: Option<String>,
 }
 
-pub fn station_list(stop_points: Vec<StopPoint>) -> Vec<Station> {
-    let mut stations: Vec<Station> = Vec::with_capacity(stop_points.len());
-    // Deduplicate by id, keeping the first sighting.
-    //
-    // The per-line fetch returns a station once per line that serves it, and
-    // most of the big ones are on three or four: Acton Town comes back from
-    // both the Bakerloo and the Piccadilly, Aldgate from the Circle,
-    // Metropolitan and Hammersmith & City. Concatenating twelve responses
-    // therefore yields **383** entries for **270** distinct stations, and a
-    // picker listing Acton Town four times is not a board anyone can use.
-    //
-    // First-wins rather than last-wins, so the entry kept is the one whose line
-    // came earliest in `LINE_IDS`; the name is the same in every response, so
-    // which one survives does not matter to the reader.
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for point in stop_points {
-        if !is_station(&point.id, point.name.as_deref()) {
-            continue;
+/// The stations to offer, in the order to offer them, merged across modes.
+///
+/// TfL's own order is the order it stores them in, which is neither the alphabet
+/// nor anything a reader would choose. Sorting by name is what the original did.
+/// The comparison is not `localeCompare`, which the browser implements with the
+/// reader's locale and which the unit tests could not pin down: it is a
+/// case-insensitive comparison with ties broken on the exact code points, so
+/// "Acton Town" and "Acton Warren" keep a stable order and the result does not
+/// depend on the machine the tests run on.
+///
+/// **Merging by name is the whole trick.** A station comes back once per mode
+/// that serves it, under a *different* stop-point id each time, and a reader
+/// thinks of Paddington as one place. The stop points for a name are folded
+/// together into one [`Station`] holding an id per mode, so the board can show
+/// the Underground's trains *and* the Elizabeth line's from one pick — which it
+/// could not before, because one id per station meant one mode's board and the
+/// rest silently returned nothing.
+///
+/// Bus, cycle and river stops are keyed by their own id instead of their name. A
+/// bus stop is named for the street it stands on, so "Oxford Circus Station" is
+/// a dozen different rows in any real list; folding them together would invent a
+/// station that does not exist, and keeping them apart is what lets a reader
+/// choose the one they are standing at.
+pub fn station_index(per_mode: Vec<(Mode, Vec<StopPoint>)>) -> Vec<Station> {
+    let mut merged: Vec<Station> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    for (mode, points) in per_mode {
+        for point in points {
+            let Some(name) = point.name.clone().filter(|name| !name.is_empty()) else {
+                continue;
+            };
+            // A stop point the arrivals endpoint cannot answer for is only worth
+            // keeping if nothing requestable exists for this row. Amersham
+            // arrives as both `940GZZLUAMS` and `0400ZZLUAMS0`; keeping the
+            // second would let `id_for` pick it and show no trains.
+            let requestable = is_requestable(&point.id);
+            if !requestable && !matches!(mode, Mode::Bus | Mode::Cycle | Mode::River) {
+                continue;
+            }
+
+            // The mode the response came from is authoritative; TfL's own
+            // `modes` array only widens it, because it is empty on some
+            // responses and a stop point reachable by two fetches is reachable
+            // by both.
+            let mut modes = modes_of(&point.modes);
+            modes.insert(mode);
+
+            let key = match mode {
+                Mode::Bus | Mode::Cycle | Mode::River => {
+                    format!("{}:{}", mode.api_name(), point.id)
+                }
+                _ => name.to_lowercase(),
+            };
+            match index.get(&key).copied() {
+                Some(at) => {
+                    let station = &mut merged[at];
+                    // A requestable id replaces a non-requestable one for the
+                    // same station, rather than sitting beside it.
+                    match station
+                        .ids
+                        .iter()
+                        .position(|(m, id)| *m == mode && requestable && !is_requestable(id))
+                    {
+                        Some(slot) => station.ids[slot] = (mode, point.id.clone()),
+                        None => {
+                            if !station.ids.iter().any(|(_, id)| *id == point.id) {
+                                station.ids.push((mode, point.id.clone()));
+                            }
+                        }
+                    }
+                    station.modes = station.modes.union(modes);
+                    if station.locality.is_none() {
+                        station.locality = point.locality.clone();
+                    }
+                }
+                None => {
+                    merged.push(Station {
+                        ids: vec![(mode, point.id.clone())],
+                        name,
+                        locality: point.locality.clone(),
+                        modes,
+                    });
+                    index.insert(key, merged.len() - 1);
+                }
+            }
         }
-        if !seen.insert(point.id.clone()) {
-            continue;
-        }
-        stations.push(Station {
-            id: point.id,
-            // The filter has just established this is `Some` and non-empty.
-            name: point.name.unwrap_or_default(),
-        });
     }
-    stations.sort_by(|a, b| {
+
+    for station in &mut merged {
+        // `id_for` takes the earliest enabled mode, so the order has to be the
+        // mode table's and not the fetch order, or the same station would show a
+        // different board depending on which response landed first.
+        station.ids.sort_by_key(|(mode, _)| position(*mode));
+    }
+    merged.sort_by(|a, b| {
         a.name
             .to_lowercase()
             .cmp(&b.name.to_lowercase())
             .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.locality.cmp(&b.locality))
     });
-    stations
+    merged
+}
+
+/// A mode's position in [`crate::modes::MODES`].
+fn position(mode: Mode) -> u8 {
+    crate::modes::MODES
+        .iter()
+        .position(|candidate| *candidate == mode)
+        .unwrap_or(usize::MAX) as u8
+}
+
+/// How a reader types a station name, and what they get back.
+///
+/// A `<select>` of 270 alphabetical stations is a board nobody scrolls, and it
+/// is unusable for the two modes whose stops are not in the list at all. So the
+/// picker is a text field with a result list under it, and this is the matching.
+///
+/// Matching is a prefix match on any word in the name, so "cross" finds "King's
+/// Cross St. Pancras" and "ark" does not find "Barking" — a reader remembers a
+/// station by one of its words, not by where its first letters fall. Ranking
+/// puts an exact match first and a prefix match second, because a reader who has
+/// typed a station's name in full wants it offered first, not fourth.
+///
+/// This is where the original was worst: it had no search at all, and a reader
+/// who wanted Lewisham scrolled a list of 270.
+pub struct Search<'a> {
+    stations: &'a [Station],
+}
+
+impl<'a> Search<'a> {
+    /// A search over a station list.
+    pub fn new(stations: &'a [Station]) -> Self {
+        Self { stations }
+    }
+
+    /// The stations matching `query`, best first, capped at [`SEARCH_LIMIT`].
+    ///
+    /// `enabled` filters as well as ranks, so a reader with only the
+    /// Underground on is never offered a bus stop they cannot board.
+    pub fn query(&self, query: &str, enabled: ModeSet) -> Vec<&'a Station> {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let mut scored: Vec<(u8, &Station)> = self
+            .stations
+            .iter()
+            .filter(|station| station.serves(enabled))
+            .filter_map(|station| score(&station.name.to_lowercase(), &needle).map(|s| (s, station)))
+            .collect();
+        // `sort_by` is stable, so equal-scoring stations keep the alphabetical
+        // order the index gave them and the list never reshuffles while typing.
+        // Reverse order: highest score first.
+        scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        scored
+            .into_iter()
+            .take(SEARCH_LIMIT)
+            .map(|(_, station)| station)
+            .collect()
+    }
+}
+
+/// How many suggestions a search offers.
+///
+/// Twelve fits on a phone above the keyboard without the list pushing the board
+/// off the screen, and it is more than enough to see the right name.
+pub const SEARCH_LIMIT: usize = 12;
+
+/// How well a station name matches a query: higher is better, `None` is no
+/// match at all.
+///
+/// Three ranks, in the order a reader means them:
+///
+/// * `3` — the name *is* the query. You know exactly where you are going.
+/// * `2` — the name starts with the query. "bri" is clearly Brixton.
+/// * `1` — the query starts a word inside the name. "cross" is clearly King's
+///   Cross, and this is the one that makes search usable at all: a station name
+///   has three or four words in it and a reader remembers one of them.
+///
+/// A match anywhere else is deliberately **not** a match. "ark" inside "Barking"
+/// would match, but so would "ark" inside half the network, and a result list
+/// that matches everything is a result list that is useless.
+fn score(name: &str, needle: &str) -> Option<u8> {
+    if name == needle {
+        return Some(3);
+    }
+    if name.starts_with(needle) {
+        return Some(2);
+    }
+    // Word-initial: the query opens a word, either after a space or at a
+    // boundary inside the name. Apostrophes and hyphens count as boundaries, so
+    // "kings" finds "King's Cross" and not "Lewisham".
+    let boundary = name
+        .char_indices()
+        .filter(|(_, c)| *c == ' ' || *c == '\'' || *c == '-')
+        .map(|(at, c)| at + c.len_utf8())
+        .chain(std::iter::once(0));
+    let word_initial = boundary.clone().any(|at| name[at..].starts_with(needle));
+    word_initial.then_some(1)
 }
 
 /// The whole departures board for one station's arrivals.
@@ -450,15 +686,29 @@ fn first_number(text: &str) -> Option<i64> {
         digits.parse().ok()
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// A stop point, as the list would supply one.
-fn station(id: &str, name: &str) -> StopPoint {
+/// A stop point, as a mode's response would supply one.
+fn stop(id: &str, name: Option<&str>) -> StopPoint {
+    StopPoint {
+        id: id.to_string(),
+        name: name.map(str::to_string),
+        modes: Vec::new(),
+        locality: None,
+    }
+}
+
+/// A stop point served by named modes.
+fn stop_for(id: &str, name: &str, modes: &[&str]) -> StopPoint {
     StopPoint {
         id: id.to_string(),
         name: Some(name.to_string()),
+        modes: modes.iter().map(|m| (*m).to_string()).collect(),
+        locality: None,
     }
 }
 
@@ -477,150 +727,233 @@ fn minutes_of(platform: &Platform) -> Vec<i32> {
     platform.departures.iter().map(|d| d.minutes).collect()
 }
 
-// ---------------------------------------------------------------- the filter
+// ------------------------------------------------------- stations and modes
 
-/// The two id prefixes are the whole filter, and they are prefixes: a stop
-/// point is a station if and only if its id starts with one of them.
+/// Every mode's api name must be a mode the app knows.
+///
+/// This is the check that would have caught the Elizabeth line going missing,
+/// and it is worth saying why it is easy to get wrong: `Mode` is an enum, so
+/// adding a mode to the app and forgetting to add it here compiles, runs, and
+/// silently narrows the station list to nothing. That is exactly how the
+/// Elizabeth line disappeared in the first place — not by a failing test, but by
+/// no test at all.
 #[test]
-fn the_station_filter_accepts_both_prefixes() {
-    assert!(is_station("940GZZLUKSX", Some("King's Cross St. Pancras")));
-    assert!(is_station("940GZZCRLHR", Some("Liverpool Street")));
-    for prefix in STATION_ID_PREFIXES {
-        assert!(
-            is_station(&format!("{prefix}XXX"), Some("Anywhere")),
-            "{prefix} must be accepted"
+fn every_mode_maps_to_a_known_api_name() {
+    for mode in crate::modes::MODES {
+        let name = mode.api_name();
+        assert_eq!(
+            Mode::from_api_name(name),
+            Some(*mode),
+            "{name} does not round-trip through from_api_name"
         );
+        assert_eq!(Mode::from_api_name(&name.to_uppercase()), Some(*mode));
     }
+    assert_eq!(Mode::from_api_name("hovercraft"), None);
 }
 
-/// Everything else the mode endpoint returns is not a station, and the common
-/// prefixes are named here because TfL's id space is the thing being filtered.
+/// Every mode has a label, a short label, a distinct glyph and a readable colour.
+///
+/// A blank label is a blank button, and a glyph collision makes two modes
+/// indistinguishable on a dense board — which is the mode chips' whole problem.
 #[test]
-fn the_station_filter_rejects_everything_else() {
-    let rejected = [
-        // Bus stops and DLR/Barnet trams, from the same mode-family endpoints.
-        "4900000934",
-        "940GZZDLSD",
-        // The Elizabeth line's own stop points are 940GZZEL — deliberately
-        // not a station prefix here, because the original's two prefixes are
-        // what it filtered on and the board's stations are the ones those
-        // name. See AGENTS.md.
-        "940GZZELWSD",
-    ];
-    for id in rejected {
-        assert!(!is_station(id, Some("Somewhere")), "{id} must be rejected");
-    }
-    // An interchange's unnamed leg carries the station's own id plus a suffix,
-    // and the original's unanchored `/(940GZZLU|940GZZCR)/` matched it, so
-    // `starts_with` matches it too. What keeps it out of the picker in
-    // practice is the `commonName: null` half of the filter, which the wire
-    // fixture below carries.
-    assert!(
-        is_station("940GZZLUKSX:1", Some("King's Cross St. Pancras")),
-        "a suffixed stop-point id carries the station prefix, as it did before"
+fn every_mode_is_nameable_and_coloured() {
+    let mut glyphs: Vec<&str> = crate::modes::MODES.iter().map(|m| m.glyph()).collect();
+    glyphs.sort_unstable();
+    let unique = glyphs.len();
+    glyphs.dedup();
+    assert_eq!(
+        glyphs.len(),
+        unique,
+        "two modes share a glyph, so a dense board cannot tell them apart"
     );
-}
-
-/// A stop point with no name cannot be offered: there would be nothing in the
-/// picker but a blank line. TfL sends `commonName: null` for these, which is
-/// the case the original's `sp.commonName &&` was there to catch.
-#[test]
-fn a_station_without_a_common_name_is_not_offered() {
-    for name in [None, Some("")] {
+    for mode in crate::modes::MODES {
+        assert!(!mode.label().is_empty(), "{mode:?} has no label");
+        assert!(!mode.short_label().is_empty(), "{mode:?} has no short label");
+        assert!(mode.colour().starts_with('#'), "{mode:?} colour is not a hex");
         assert!(
-            !is_station("940GZZLUKSX", name),
-            "a stop point with no usable name must be rejected: {name:?}"
+            contrast_ratio(mode.colour(), line_ink(mode.colour())) >= 4.5,
+            "{mode:?} ({}) is not readable on its own chip",
+            mode.colour()
         );
     }
-    // And the id half still holds on its own: a named non-station is rejected.
-    assert!(!is_station("4900000934", Some("Tottenham Court Road")));
+}
+
+/// A station is anything with a name, in every mode.
+///
+/// The previous filter required `940GZZLU`/`940GZZCR`, which is what hid the
+/// Elizabeth line, the Overground and the DLR from a board whose own request
+/// asked for them. Every id below is a real one, taken from real responses.
+#[test]
+fn a_station_is_anything_with_a_name_in_any_mode() {
+    for (mode, id, name) in [
+        (Mode::Tube, "940GZZLUACT", "Acton Town Underground Station"),
+        (Mode::Elizabeth, "910GABWDXR", "Abbey Wood"),
+        (Mode::Overground, "910GANERLEY", "Anerley Rail Station"),
+        (Mode::Dlr, "940GZZDLABR", "Abbey Road DLR Station"),
+        (Mode::Cable, "940GZZALGWP", "Greenwich Peninsula"),
+        (Mode::Bus, "490000173RC", "Oxford Circus Station"),
+    ] {
+        assert!(is_station(Some(name)), "{id} ({name}) must be a station");
+        let stations = station_index(vec![(mode, vec![stop(id, Some(name))])]);
+        assert_eq!(stations.len(), 1, "{name} was filtered out");
+    }
+    // Only a missing name is disqualifying: TfL sends `commonName: null` for the
+    // unnamed legs of an interchange, and those carry their station's own id
+    // shape, so without this check the picker fills with blanks.
+    assert!(!is_station(None));
+    assert!(!is_station(Some("")));
+}
+
+/// An interchange becomes **one** station holding an id per mode.
+///
+/// This is the test the previous version could not have. One id per station
+/// meant picking Paddington showed the Underground's board and the Elizabeth
+/// line's trains were never requested — and requesting the Underground's id for
+/// the Elizabeth line returns zero arrivals, so the omission was invisible
+/// rather than obviously wrong.
+#[test]
+fn an_interchange_is_one_station_with_an_id_per_mode() {
+    let index = station_index(vec![
+        (Mode::Tube, vec![stop("940GZZLUACT", Some("Acton Town Underground Station"))]),
+        (Mode::Tube, vec![stop("940GZZLUACT", Some("Acton Town Underground Station"))]),
+        (
+            Mode::Overground,
+            vec![stop("910GACTNML", Some("Acton Town Underground Station"))],
+        ),
+    ]);
+    assert_eq!(index.len(), 1, "one place is one row: {index:?}");
+    let station = &index[0];
+    assert_eq!(station.ids.len(), 2, "one id per mode");
+    assert_eq!(station.id_for(ModeSet::all()), Some("940GZZLUACT"));
+    let mut overground_only = ModeSet::empty();
+    overground_only.insert(Mode::Overground);
+    assert_eq!(station.id_for(overground_only), Some("910GACTNML"));
+    assert_eq!(station.id_for(ModeSet::empty()), None);
+    assert!(!station.serves(ModeSet::empty()));
+}
+
+/// A bus stop keeps its own row, because a bus stop is named for its street.
+///
+/// Folding bus stops together by name would invent a station that does not
+/// exist: "Oxford Circus Station" is a dozen separate stops, and a reader who
+/// wants the one outside the Tube entrance is not served by a merged row that
+/// silently picked one of them.
+#[test]
+fn bus_stops_are_not_merged_by_name() {
+    let index = station_index(vec![(
+        Mode::Bus,
+        vec![
+            stop("490000173RC", Some("Oxford Circus Station")),
+            stop("490000173RG", Some("Oxford Circus Station")),
+            stop("490000173Z", Some("Oxford Circus Station")),
+        ],
+    )]);
+    assert_eq!(index.len(), 3, "three stops, three rows: {index:?}");
+    for station in &index {
+        assert_eq!(station.modes.active(), vec![Mode::Bus]);
+    }
+}
+
+/// A stop point the arrivals endpoint cannot answer for is not offered.
+///
+/// Amersham arrives as `0400ZZLUAMS0`, which returns an empty array with HTTP
+/// 200 and no error — a station that looks listed and shows no trains. The
+/// requestable `940GZZLUAMS` for the same place returns live Metropolitan
+/// trains, so when both are present the requestable one wins.
+#[test]
+fn an_unrequestable_id_is_dropped_or_replaced() {
+    let index = station_index(vec![(Mode::Tube, vec![stop("0400ZZLUAMS0", Some("Amersham"))])]);
+    assert!(index.is_empty(), "an unrequestable id offers no board");
+
+    let index = station_index(vec![(
+        Mode::Tube,
+        vec![
+            stop("0400ZZLUAMS0", Some("Amersham Underground Station")),
+            stop("940GZZLUAMS", Some("Amersham Underground Station")),
+        ],
+    )]);
+    assert_eq!(index.len(), 1, "one place is one row: {index:?}");
+    assert_eq!(index[0].id_for(ModeSet::all()), Some("940GZZLUAMS"));
+
+    assert!(is_requestable("940GZZLUACT"));
+    assert!(is_requestable("910GABWDXR"));
+    assert!(!is_requestable("0400ZZLUAMS0"));
+    assert!(!is_requestable("2100ZZLUCXY0"));
+    assert!(!is_requestable("490000173RC"));
+}
+
+/// The response's mode is authoritative and TfL's own array widens it.
+#[test]
+fn the_response_mode_wins_and_the_modes_array_widens() {
+    let index = station_index(vec![(
+        Mode::Tube,
+        vec![stop_for("940GZZLUACT", "Acton Town Underground Station", &["tube", "dlr"])],
+    )]);
+    assert_eq!(index[0].modes.active(), vec![Mode::Tube, Mode::Dlr]);
+    let index = station_index(vec![(
+        Mode::Cable,
+        vec![stop("940GZZALGWP", Some("Greenwich Peninsula"))],
+    )]);
+    assert_eq!(index[0].modes.active(), vec![Mode::Cable]);
+}
+
+/// A mode the app does not know is ignored, not fatal.
+#[test]
+fn an_unknown_mode_does_not_break_the_list() {
+    let index = station_index(vec![(
+        Mode::Tube,
+        vec![stop_for("940GZZLUACT", "Acton Town", &["tube", "hovercraft", "river-bus"])],
+    )]);
+    // `river-bus` is an alias for the river, so it maps; hovercraft is ignored.
+    assert_eq!(index[0].modes.active(), vec![Mode::Tube, Mode::River]);
 }
 
 // -------------------------------------------------------------- station sort
 
-/// The picker is alphabetical by name, and the names that share a prefix come
-/// out in the order a reader expects.
+/// The picker is alphabetical by name.
 #[test]
 fn stations_sort_alphabetically_by_common_name() {
-    let listed = vec![
-        station("940GZZLULST", "Liverpool Street"),
-        station("940GZZLUKSX", "King's Cross St. Pancras"),
-        station("940GZZLUBZW", "Brixton"),
-        station("940GZZLUWLO", "Wood Lane"),
-    ];
-    let names: Vec<String> = station_list(listed)
-        .into_iter()
-        .map(|s| s.name)
-        .collect();
+    let index = station_index(vec![(
+        Mode::Tube,
+        vec![
+            stop("940GZZLULST", Some("Liverpool Street Underground Station")),
+            stop("940GZZLUKSX", Some("King's Cross St. Pancras Underground Station")),
+            stop("940GZZLUBZW", Some("Brixton Underground Station")),
+            stop("940GZZLUWLO", Some("Wood Lane Underground Station")),
+        ],
+    )]);
+    let names: Vec<&str> = index.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,
-        vec!["Brixton", "King's Cross St. Pancras", "Liverpool Street", "Wood Lane"]
+        vec![
+            "Brixton Underground Station",
+            "King's Cross St. Pancras Underground Station",
+            "Liverpool Street Underground Station",
+            "Wood Lane Underground Station"
+        ]
     );
 }
 
 /// The order is a comparison of names, not of ids, and it is case-insensitive
-/// with an exact tie-break — so it cannot depend on the machine's locale the
-/// way the original's `localeCompare` did.
+/// with an exact tie-break — so it cannot depend on the machine's locale the way
+/// the original's `localeCompare` did.
 #[test]
 fn the_station_sort_is_case_insensitive_and_stable() {
-    let listed = vec![
-        station("940GZZLUAAA", "Acton Town"),
-        station("940GZZLUBBB", "acton warren"),
-        station("940GZZLUCCC", "Acton Town"),
-    ];
-    let names: Vec<String> = station_list(listed)
-        .into_iter()
-        .map(|s| s.name)
-        .collect();
-    // Lowercase compares equal for the first and third, so the exact-code-point
-    // tie-break decides: "Acton Town" < "acton warren" because 'T' < 'w'.
-    assert_eq!(
-        names,
-        vec!["Acton Town", "Acton Town", "acton warren"]
-    );
+    let index = station_index(vec![(
+        Mode::Tube,
+        vec![
+            stop("940GZZLUAAA", Some("Acton Town")),
+            stop("940GZZLUBBB", Some("acton warren")),
+            stop("940GZZLUCCC", Some("Acton Town")),
+        ],
+    )]);
+    let names: Vec<&str> = index.iter().map(|s| s.name.as_str()).collect();
+    // "Acton Town" is given twice and the merge is by name, so it is one row.
+    // Lowercase compares equal for it and for "acton warren", so the
+    // exact-code-point tie-break decides: 'T' (0x54) < 'w' (0x77).
+    assert_eq!(names, vec!["Acton Town", "acton warren"]);
 }
 
-/// A station served by more than one line arrives once per line, and must
-/// appear in the picker once.
-///
-/// This test used to assert the opposite — "duplicates are kept" — and that was
-/// not an accident of the fixture but the shipped behaviour: concatenating the
-/// twelve per-line responses produced 383 options for 270 stations, with Acton
-/// Town listed three times. It was found by loading the built page and reading
-/// the options, which is the only check that could see it: the single-request
-/// version of this code could not produce duplicates, so no unit test fed from
-/// one response would ever have caught it.
-#[test]
-fn a_station_served_by_several_lines_is_listed_once() {
-    // Acton Town, as the Bakerloo and the Piccadilly both return it.
-    let listed = vec![
-        station("940GZZLUACT", "Acton Town Underground Station"),
-        station("940GZZLUACT", "Acton Town Underground Station"),
-        station("940GZZLUACT", "Acton Town Underground Station"),
-    ];
-    let stations = station_list(listed);
-    assert_eq!(
-        stations.len(),
-        1,
-        "a station on three lines is one station, not three: {stations:?}"
-    );
-    assert_eq!(stations[0].name, "Acton Town Underground Station");
-    // The id is the thing the picker submits, so it must survive intact.
-    assert_eq!(stations[0].id, "940GZZLUACT");
-}
-
-/// The filter runs on the way in, so a caller cannot get a non-station past it
-/// by building a `Station` itself.
-#[test]
-fn the_station_list_applies_the_filter() {
-    let listed = vec![
-        station("4900000934", "Not A Station"),
-        station("940GZZLUBZW", "Brixton"),
-    ];
-    let kept = station_list(listed);
-    assert_eq!(kept.len(), 1);
-    assert_eq!(kept[0].name, "Brixton");
-}
 
 // ------------------------------------------------------------- arrivals sort
 
@@ -865,8 +1198,14 @@ fn the_wire_formats_still_parse() {
     .expect("stop point list");
     let list: Vec<StopPoint> = serde_json::from_value(stop_points["stopPoints"].clone())
         .expect("the stop points, deserialised exactly as the browser does");
-    let kept = station_list(list);
+    let kept = station_index(vec![(Mode::Tube, list)]);
     let names: Vec<&str> = kept.iter().map(|s| s.name.as_str()).collect();
+    // Amersham is in this fixture as `0400ZZLUAMS0`, an id the arrivals
+    // endpoint answers with an empty array, so it is not offered: a station
+    // that cannot produce a board has no business in the picker. That is a
+    // different question from the old prefix filter, which rejected it — along
+    // with the Elizabeth line, the Overground and the DLR — for merely not
+    // starting with `940GZZLU`.
     assert_eq!(
         names,
         vec![
@@ -874,18 +1213,27 @@ fn the_wire_formats_still_parse() {
             "Brixton Underground Station",
             "King's Cross St. Pancras Underground Station",
             "Liverpool Street Underground Station",
-        ]
+        ],
+        // Two are absent, and both for a reason worth keeping: Amersham carries
+        // only `0400ZZ…`, which the arrivals endpoint answers with an empty
+        // array; and `4900000934`, the old Tottenham Court Road id, is not a
+        // requestable prefix at all. A row that cannot produce a board is not
+        // offered.
     );
     // The ids must be the real ones, or every later request 404s. This is the
     // assertion that would have caught the `stopPointId` mistake: deserialising
     // that name leaves every id empty, the filter drops everything, and the
     // board quietly offers no stations at all.
     assert!(
-        kept.iter().all(|s| is_station(&s.id, Some(&s.name))),
-        "every station kept must carry its own real id: {:?}",
-        kept.iter().map(|s| &s.id).collect::<Vec<_>>()
+        kept.iter()
+            .all(|s| s.id_for(ModeSet::all()).is_some_and(is_requestable)),
+        "every station kept must carry a requestable id"
     );
-    assert!(kept.iter().any(|s| s.id == "940GZZLUBZW"), "Brixton by id");
+    assert!(
+        kept.iter()
+            .any(|s| s.id_for(ModeSet::all()) == Some("940GZZLUBZW")),
+        "Brixton by id"
+    );
 
     let arrivals: serde_json::Value = serde_json::from_str(
         r#"[
@@ -932,16 +1280,19 @@ fn a_real_stop_point_response_yields_stations() {
     let bytes = include_bytes!("../tests/fixtures_line_stoppoints.json");
     let stops: Vec<StopPoint> =
         serde_json::from_slice(bytes).expect("a real line stop-point response");
-    let stations = station_list(stops);
+    let stations = station_index(vec![(Mode::Tube, stops)]);
 
     assert!(
         !stations.is_empty(),
         "a real response must yield stations; an empty list means the id field \
          is wrong again"
     );
-    // Six are Underground stations in this slice; the two `0400ZZLU…` entries
-    // are named but are not on the network this board serves.
-    assert_eq!(stations.len(), 6, "unexpected station count: {stations:?}");
+    // All eight of the fixture's stop points have a requestable id, and Amersham
+    // is among them: its `940GZZLUAMS` form returns live Metropolitan trains even
+    // though the same response also lists a `0400ZZLUAMS0` form that returns none.
+    // That pair is the whole reason `is_requestable` exists, and this count is
+    // what says the filter is not throwing away stations that do have a board.
+    assert_eq!(stations.len(), 8, "unexpected station count: {stations:?}");
     let names: Vec<&str> = stations.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,
@@ -950,22 +1301,26 @@ fn a_real_stop_point_response_yields_stations() {
             "Aldgate East Underground Station",
             "Aldgate Underground Station",
             "Alperton Underground Station",
+            "Amersham Underground Station",
             "Angel Underground Station",
             "Archway Underground Station",
+            "Arnos Grove Underground Station",
         ]
     );
     // And the ids are the ones the arrivals endpoint will accept.
     for station in &stations {
         assert!(
-            station.id.starts_with("940GZZLU") || station.id.starts_with("940GZZCR"),
-            "{} has an id the board cannot request arrivals for: {}",
-            station.name,
-            station.id
+            is_requestable(station.id_for(ModeSet::all()).unwrap_or_default()),
+            "{} has an id the arrivals endpoint will not answer for",
+            station.name
         );
     }
     // A station on three lines arrives in three responses; the picker must not
     // show it three times.
-    let unique: std::collections::HashSet<&str> = stations.iter().map(|s| s.id.as_str()).collect();
+    let unique: std::collections::HashSet<&str> = stations
+        .iter()
+        .map(|s| s.id_for(ModeSet::all()).unwrap_or_default())
+        .collect();
     assert_eq!(unique.len(), stations.len(), "duplicate stations in the picker");
 }
 
@@ -1076,14 +1431,17 @@ fn concatenating_the_line_responses_does_not_repeat_a_station() {
         serde_json::from_slice::<Vec<StopPoint>>(piccadilly).expect("the Piccadilly response"),
     );
     let before = all.len();
-    let stations = station_list(all);
+    let stations = station_index(vec![(Mode::Tube, all)]);
     assert!(
         stations.len() < before,
         "concatenating responses must collapse repeats: {} in, {} out",
         before,
         stations.len()
     );
-    let mut ids: Vec<&str> = stations.iter().map(|s| s.id.as_str()).collect();
+    let mut ids: Vec<&str> = stations
+        .iter()
+        .map(|s| s.id_for(ModeSet::all()).unwrap_or_default())
+        .collect();
     let unique = ids.len();
     ids.sort_unstable();
     ids.dedup();
@@ -1099,4 +1457,191 @@ fn concatenating_the_line_responses_does_not_repeat_a_station() {
          offered once"
     );
 }
+
+// -------------------------------------------------------------- the search
+
+/// A small station list to search. The ranking tests all want the same one, and
+/// a shared fixture keeps them comparable.
+fn searchable() -> Vec<Station> {
+    station_index(vec![(
+        Mode::Tube,
+        vec![
+            stop("940GZZLUACT", Some("Acton Town Underground Station")),
+            stop("940GZZLUBZW", Some("Brixton Underground Station")),
+            stop("940GZZLUBKG", Some("Barking Underground Station")),
+            stop("940GZZLUKSX", Some("Kings Cross St. Pancras Underground Station")),
+            stop("940GZZLULEY", Some("Leyton Underground Station")),
+            stop("940GZZLULST", Some("Liverpool Street Underground Station")),
+        ],
+    )])
 }
+
+/// Typing a fragment finds the station whose name starts with it.
+#[test]
+fn search_finds_a_name_by_its_start() {
+    let stations = searchable();
+    let found = Search::new(&stations).query("brix", ModeSet::all());
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name, "Brixton Underground Station");
+}
+
+/// A word from the middle of a name finds it too, which is what makes search
+/// usable: a reader remembers one word of a four-word station name, not where
+/// its first letters fall.
+#[test]
+fn search_matches_a_word_inside_the_name() {
+    let stations = searchable();
+    let found = Search::new(&stations).query("cross", ModeSet::all());
+    assert_eq!(found.len(), 1, "'cross' must find Kings Cross");
+    assert!(found[0].name.contains("Cross"));
+}
+
+/// An exact name outranks a prefix, which outranks a word match — so typing a
+/// station's name in full puts it first rather than fourth.
+#[test]
+fn an_exact_match_ranks_first() {
+    let stations = searchable();
+    let found = Search::new(&stations).query("Brixton Underground Station", ModeSet::all());
+    assert_eq!(found[0].name, "Brixton Underground Station");
+}
+
+/// A fragment from the middle of a word matches nothing, because a result list
+/// that matches everything is a result list that is useless.
+#[test]
+fn a_mid_word_fragment_matches_nothing() {
+    let stations = searchable();
+    let search = Search::new(&stations);
+    assert!(search.query("ark", ModeSet::all()).is_empty());
+    assert!(search.query("", ModeSet::all()).is_empty());
+    assert!(search.query("   ", ModeSet::all()).is_empty());
+}
+
+/// The search respects the mode switches: with only the Underground on, a bus
+/// stop is not offered even though it matches perfectly.
+#[test]
+fn search_respects_the_mode_switches() {
+    let stations = station_index(vec![
+        (
+            Mode::Tube,
+            vec![stop("940GZZLULEY", Some("Leyton Underground Station"))],
+        ),
+        (Mode::Bus, vec![stop("4900000944", Some("Leyton Station"))]),
+    ]);
+    let search = Search::new(&stations);
+    assert_eq!(search.query("leyton", ModeSet::all()).len(), 2);
+
+    let mut tube_only = ModeSet::empty();
+    tube_only.insert(Mode::Tube);
+    let found = search.query("leyton", tube_only);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name, "Leyton Underground Station");
+
+    let mut bus_only = ModeSet::empty();
+    bus_only.insert(Mode::Bus);
+    let found = search.query("leyton", bus_only);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name, "Leyton Station");
+}
+
+/// The list is capped, and it is capped by showing the *best* matches rather
+/// than the first twelve found.
+#[test]
+fn search_is_capped_and_returns_the_best() {
+    let mut points: Vec<StopPoint> = (0..40)
+        .map(|n| {
+            stop(
+                &format!("940GZZLUB{n:02}"),
+                Some(&format!("Brixton Road {n} Underground Station")),
+            )
+        })
+        .collect();
+    // One exact match, last in the input.
+    points.push(stop("940GZZLUBZZ", Some("Brixton")));
+    let stations = station_index(vec![(Mode::Tube, points)]);
+    let found = Search::new(&stations).query("Brixton", ModeSet::all());
+    assert_eq!(found.len(), SEARCH_LIMIT, "the list is capped");
+    assert_eq!(found[0].name, "Brixton", "the exact match is first");
+}
+
+/// Typing narrows the list, so results do not jump about as a reader types.
+#[test]
+fn results_narrow_as_the_query_grows() {
+    let stations = searchable();
+    let search = Search::new(&stations);
+    let one = search.query("b", ModeSet::all()).len();
+    let two = search.query("br", ModeSet::all()).len();
+    assert!(two <= one, "a longer query cannot match more: {one} then {two}");
+    assert!(two >= 1, "'br' must still match Brixton");
+}
+}
+
+// ------------------------------------------------- the mode response's shape
+
+/// The wrapper `StopPoint/Mode/{mode}` puts its list in.
+///
+/// **The endpoint does not return a bare array.** It returns
+/// `{"$type": …, "stopPoints": [...]}`.
+///
+/// That is worth a type and a test of its own, because the mistake is silent in
+/// the worst way: deserialising the wrapper as a `Vec<StopPoint>` fails to parse,
+/// the failure is caught, and the board reports that it could not load any
+/// stations — with every HTTP status at 200 and the network perfectly healthy. It
+/// looks exactly like being offline, and it cost a full debugging cycle.
+///
+/// The previous version had three shapes in play and this one of them; the two
+/// that remain are [`StopPointList`] and the bare array `Line/{id}/StopPoints`
+/// returns, which is why both are named rather than one being assumed.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct StopPointList {
+    #[serde(rename = "stopPoints", default)]
+    pub stop_points: Vec<StopPoint>,
+}
+
+#[cfg(test)]
+mod shape {
+    use super::*;
+
+    /// The first two stop points of a real `elizabeth-line` response, including
+    /// the fields the app does not read — a fixture trimmed to the two fields it
+    /// needs proves nothing about whether it is reading the right ones.
+    const MODE_RESPONSE: &str = r#"{
+      "$type": "TflStopPoint",
+      "stopPoints": [
+        {"$type":"TflStopPoint","id":"9100ABWDXR0","name":"Abbey Wood Station","commonName":"Abbey Wood Station","lat":51.4940,"lon":0.0703,"modes":["elizabeth-line"],"children":[],"additionalProperties":{}},
+        {"$type":"TflStopPoint","id":"9100ABWDXR1","name":"Abbey Wood Station","commonName":null,"lat":51.4940,"lon":0.0703,"modes":["elizabeth-line"]}
+      ]
+    }"#;
+
+    #[test]
+    fn the_mode_response_is_a_wrapper_not_an_array() {
+        let list: StopPointList = serde_json::from_str(MODE_RESPONSE).expect("the wrapper parses");
+        assert_eq!(list.stop_points.len(), 2);
+        assert_eq!(list.stop_points[0].id, "9100ABWDXR0");
+        assert_eq!(
+            list.stop_points[0].name.as_deref(),
+            Some("Abbey Wood Station")
+        );
+        assert_eq!(list.stop_points[0].modes, vec!["elizabeth-line"]);
+        // The nameless leg parses to `None`, which is what the filter rejects.
+        assert_eq!(list.stop_points[1].name, None);
+
+        // And the thing that broke: a bare-array parse of the same bytes fails.
+        assert!(
+            serde_json::from_str::<Vec<StopPoint>>(MODE_RESPONSE).is_err(),
+            "if this ever parses as a bare array the endpoint changed and \
+             `load_stations` must be revisited"
+        );
+    }
+
+    /// An empty or missing list is not a failure — it is an empty picker, and the
+    /// board must say so rather than report an error it cannot act on.
+    #[test]
+    fn an_empty_mode_response_parses_to_nothing() {
+        let list: StopPointList =
+            serde_json::from_str(r#"{"stopPoints":[]}"#).expect("empty parses");
+        assert!(list.stop_points.is_empty());
+        let list: StopPointList = serde_json::from_str(r#"{}"#).expect("a missing key parses");
+        assert!(list.stop_points.is_empty());
+    }
+}
+
