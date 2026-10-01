@@ -561,34 +561,66 @@ pub const SEARCH_LIMIT: usize = 12;
 /// How well a station name matches a query: higher is better, `None` is no
 /// match at all.
 ///
-/// Three ranks, in the order a reader means them:
+/// Four ranks, best first. The first three are what a matching search box does;
+/// the fourth is the one a reader actually wants and no substring search has.
 ///
-/// * `3` — the name *is* the query. You know exactly where you are going.
-/// * `2` — the name starts with the query. "bri" is clearly Brixton.
-/// * `1` — the query starts a word inside the name. "cross" is clearly King's
-///   Cross, and this is the one that makes search usable at all: a station name
-///   has three or four words in it and a reader remembers one of them.
+/// * `4` — the name **is** the query. You know exactly where you are going.
+/// * `3` — the name **starts with** the query. "bri" is clearly Brixton.
+/// * `2` — the query starts a **word** inside the name. "cross" is King's Cross.
+/// * `1` — the query's letters appear **in order, anywhere**. "kxs" is King's
+///   Cross, "sm" is Stratford **I**nter**n**ational… and, more to the point,
+///   "stfint" finds Stratford International where a substring search finds
+///   nothing at all.
 ///
-/// A match anywhere else is deliberately **not** a match. "ark" inside "Barking"
-/// would match, but so would "ark" inside half the network, and a result list
-/// that matches everything is a result list that is useless.
+/// That last rank is what makes this fuzzy rather than substring. A reader typing
+/// on a phone mis-keys constantly, and a search that insists on exact substrings
+/// returns nothing for "stretford" when the station is "Stratford". Matching
+/// **characters in order** tolerates a mistyped letter and still ranks the
+/// obvious answer first.
+///
+/// The cost is false positives — "barking" matches "Barking" and a handful of
+/// others — which is why the rank is lowest and why the list is capped. A reader
+/// who typed a query and got five suggestions, the right one first, has been
+/// helped; a reader who got nothing has not.
 fn score(name: &str, needle: &str) -> Option<u8> {
     if name == needle {
-        return Some(3);
+        return Some(4);
     }
     if name.starts_with(needle) {
+        return Some(3);
+    }
+    // Word-initial: the query opens a word, either at the start or after a
+    // separator. Apostrophes and hyphens count, so "kings" finds "King's Cross".
+    let boundaries = std::iter::once(0).chain(
+        name.char_indices()
+            .filter(|(_, c)| *c == ' ' || *c == '\'' || *c == '-')
+            .map(|(at, c)| at + c.len_utf8()),
+    );
+    if boundaries.clone().any(|at| name[at..].starts_with(needle)) {
         return Some(2);
     }
-    // Word-initial: the query opens a word, either after a space or at a
-    // boundary inside the name. Apostrophes and hyphens count as boundaries, so
-    // "kings" finds "King's Cross" and not "Lewisham".
-    let boundary = name
-        .char_indices()
-        .filter(|(_, c)| *c == ' ' || *c == '\'' || *c == '-')
-        .map(|(at, c)| at + c.len_utf8())
-        .chain(std::iter::once(0));
-    let word_initial = boundary.clone().any(|at| name[at..].starts_with(needle));
-    word_initial.then_some(1)
+    subsequence(name, needle).then_some(1)
+}
+
+/// Whether every character of `needle` appears in `name`, in order.
+///
+/// The cheap version, and deliberately so: it answers "could this be it" and lets
+/// the rank order decide, rather than scoring how *close* a match is. A full
+/// edit-distance would rank better, at the cost of scoring thousands of stations
+/// on every keystroke — and the thing this has to be is fast, because it runs
+/// while someone is typing.
+///
+/// Not anchored at either end, and not required to start at a word boundary: that
+/// is what lets "stfint" reach Stratford International.
+fn subsequence(name: &str, needle: &str) -> bool {
+    let mut rest = name;
+    for wanted in needle.chars() {
+        match rest.find(wanted) {
+            Some(at) => rest = &rest[at + wanted.len_utf8()..],
+            None => return false,
+        }
+    }
+    true
 }
 
 /// The whole departures board for one station's arrivals.
@@ -686,6 +718,73 @@ fn first_number(text: &str) -> Option<i64> {
         digits.parse().ok()
     }
 }
+
+/// The shortest a word may be and still be worth sending to the search API.
+///
+/// Three characters. Two is where "int" lives, and a two-character query to a
+/// rate-limited API is a request that returns most of the network.
+pub const MIN_PHRASE_CHARS: usize = 3;
+
+/// The shorter phrases to try when the reader's own query finds nothing.
+///
+/// Longest word first, and only words long enough to be a phrase worth sending.
+/// The ordering is the whole point: for "stratford int" the fallbacks are
+/// "stratford" and then nothing, because "int" matches Ashford, Braintree and
+/// Fintringham — twenty rail stations that share two letters with the query and
+/// none of which is the one the reader meant.
+///
+/// This lives in the domain rather than beside the fetch so it can be tested on
+/// the host; the browser is a poor place to discover that a fallback query is
+/// two letters long.
+pub fn fallback_queries(query: &str) -> Vec<String> {
+    let mut words: Vec<String> = query
+        .split_whitespace()
+        .filter(|word| word.chars().count() >= MIN_PHRASE_CHARS)
+        .map(str::to_string)
+        .collect();
+    // Longest first, then alphabetically, so the order does not depend on the
+    // order the reader happened to type in.
+    words.sort_by(|a, b| {
+        b.chars()
+            .count()
+            .cmp(&a.chars().count())
+            .then_with(|| a.cmp(b))
+    });
+    words.dedup();
+    words
+}
+
+/// One match from `StopPoint/Search`.
+///
+/// **The field is `id`, not `stopPointId`.** Same trap as the stop-point list, in
+/// a new place, with the same quiet consequence: `StopPoint/Search` sends
+/// `"id"`, so deserialising the documented name left every match without an id,
+/// every match was filtered out, and **search found nothing at all** — with
+/// every HTTP status at 200. A search box that silently returns nothing is
+/// indistinguishable from one that genuinely has no results.
+///
+/// The type lives here rather than in `ui.rs` so this test runs on the host, not
+/// only on wasm: the bug it guards against is invisible from the browser.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct SearchMatch {
+    #[serde(rename = "id", default)]
+    pub stop_point_id: Option<String>,
+    #[serde(default)]
+    pub name: String,
+    #[serde(rename = "localityName", default)]
+    pub locality: Option<String>,
+    #[serde(default)]
+    pub modes: Vec<String>,
+}
+
+/// The `StopPoint/Search` response, as TfL sends it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct SearchResponse {
+    #[serde(default)]
+    pub matches: Vec<SearchMatch>,
+}
+
+
 
 #[cfg(test)]
 mod tests {
@@ -850,7 +949,14 @@ fn bus_stops_are_not_merged_by_name() {
     )]);
     assert_eq!(index.len(), 3, "three stops, three rows: {index:?}");
     for station in &index {
-        assert_eq!(station.modes.active(), vec![Mode::Bus]);
+        // A bus stop is keyed by its id, so however many modes TfL says it has,
+        // each stop is its own row rather than being folded into one.
+        assert_eq!(station.ids.len(), 1);
+        assert_eq!(station.ids[0].0, Mode::Bus);
+        assert!(
+            station.modes.contains(Mode::Bus),
+            "a bus stop is served by the bus"
+        );
     }
 }
 
@@ -1505,15 +1611,60 @@ fn an_exact_match_ranks_first() {
     assert_eq!(found[0].name, "Brixton Underground Station");
 }
 
-/// A fragment from the middle of a word matches nothing, because a result list
-/// that matches everything is a result list that is useless.
+/// Fuzzy search finds the station a mistyped query meant.
+///
+/// These are the queries a reader produces on a phone, not the ones they mean.
 #[test]
-fn a_mid_word_fragment_matches_nothing() {
+fn a_mistyped_query_still_finds_the_station() {
     let stations = searchable();
     let search = Search::new(&stations);
-    assert!(search.query("ark", ModeSet::all()).is_empty());
+    // "kngs crs" is King's Cross with vowels and an apostrophe dropped.
+    let found = search.query("kngs crs", ModeSet::all());
+    assert!(
+        found.iter().any(|s| s.name.contains("Kings Cross")),
+        "a subsequence must find Kings Cross from \"kngs crs\": {:?}",
+        found.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+    // The letters must come in order. "zzngs" cannot match anything: no station
+    // name in this list has two consecutive `z`s in the wrong places.
+    assert!(
+        search.query("zzngs", ModeSet::all()).is_empty(),
+        "a subsequence must be in order"
+    );
+    // A dropped letter still reaches its station: "brxton" is Brixton with the
+    // `i` left out.
+    let found = search.query("brxton", ModeSet::all());
+    assert!(
+        found.iter().any(|s| s.name.starts_with("Brixton")),
+        "a dropped letter must still find Brixton: {:?}",
+        found.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+}
+
+/// An empty query offers nothing, rather than all 2,700 stations.
+#[test]
+fn an_empty_query_offers_nothing() {
+    let stations = searchable();
+    let search = Search::new(&stations);
     assert!(search.query("", ModeSet::all()).is_empty());
     assert!(search.query("   ", ModeSet::all()).is_empty());
+}
+
+/// Fuzzy matching is ranked below every exact match, so it never crowds out the
+/// station the reader actually asked for.
+#[test]
+fn a_fuzzy_match_ranks_below_a_prefix_match() {
+    let stations = station_index(vec![(
+        Mode::Tube,
+        vec![
+            stop("940GZZLUAAA", Some("Brixton Underground Station")),
+            stop("940GZZLUAAB", Some("Barking Riverside Underground Station")),
+        ],
+    )]);
+    let search = Search::new(&stations);
+    // "bri" is a prefix of Brixton and a subsequence of neither the other.
+    let found = search.query("bri", ModeSet::all());
+    assert_eq!(found[0].name, "Brixton Underground Station");
 }
 
 /// The search respects the mode switches: with only the Underground on, a bus
@@ -1643,5 +1794,78 @@ mod shape {
         let list: StopPointList = serde_json::from_str(r#"{}"#).expect("a missing key parses");
         assert!(list.stop_points.is_empty());
     }
+
+// ---------------------------------------------------- the search response
+
+#[cfg(test)]
+mod search_shape {
+    use super::*;
+
+    /// A real response for "Stratford International Rail", verbatim.
+    const RESPONSE: &str = r#"{
+      "$type": "Tfl.Api.Presentation.Entities.SearchResponse, Tfl.Api.Presentation.Entities",
+      "query": "Stratford International Rail",
+      "total": 1,
+      "matches": [
+        {"$type":"Tfl.Api.Presentation.Entities.Match, Tfl.Api.Presentation.Entities",
+         "icsId":"910GSTFODOM","id":"910GSTFODOM","lat":51.5446,"lon":-0.0133,
+         "name":"Stratford International Rail Station","modes":["national-rail"]}
+      ]
+    }"#;
+
+    #[test]
+    fn a_search_match_carries_its_id() {
+        let response: SearchResponse = serde_json::from_str(RESPONSE).expect("the search parses");
+        assert_eq!(response.matches.len(), 1);
+        let found = &response.matches[0];
+        assert_eq!(
+            found.stop_point_id.as_deref(),
+            Some("910GSTFODOM"),
+            "the national-rail stop must keep its id, or it cannot be requested"
+        );
+        assert_eq!(found.name, "Stratford International Rail Station");
+        assert_eq!(found.modes, vec!["national-rail"]);
+        // And the mode maps, which is what labels the row.
+        assert_eq!(
+            found
+                .modes
+                .iter()
+                .find_map(|name| crate::modes::Mode::from_api_name(name)),
+            Some(crate::modes::Mode::NationalRail)
+        );
+    }
+
+    /// A match with no id is a bus *route* or a line, not a stop point, and has
+    /// nothing to request arrivals for. It must be dropped rather than offered.
+    #[test]
+    fn a_match_without_an_id_is_dropped() {
+        let response: SearchResponse = serde_json::from_str(
+            r#"{"matches":[{"name":"Route 88","icsId":"88","modes":["bus"]}]}"#,
+        )
+        .expect("parses");
+        assert!(response.matches[0].stop_point_id.is_none());
+        assert!(
+            response.matches[0].stop_point_id.is_none(),
+            "a match with no stop-point id is not a station"
+        );
+    }
+
+    /// TfL sends `"id"`. Deserialising the documented `stopPointId` instead
+    /// leaves every id empty, which is the bug this type exists to prevent.
+    #[test]
+    fn the_documented_field_name_would_find_nothing() {
+        #[derive(serde::Deserialize)]
+        struct Wrong {
+            #[serde(rename = "stopPointId", default)]
+            #[allow(dead_code)]
+            stop_point_id: Option<String>,
+        }
+        let wrong: Wrong = serde_json::from_str(RESPONSE).expect("parses");
+        assert!(
+            wrong.stop_point_id.is_none(),
+            "if this ever parses, the endpoint changed and the type must be revisited"
+        );
+    }
 }
 
+}

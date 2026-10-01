@@ -49,9 +49,15 @@ or the bindings generator, and needs no network.
 
 ## Modes
 
-Eight modes, switchable from the header and remembered in the link: Underground,
-Elizabeth line, Overground, DLR, Buses, Cable car, Cycles, River. Search across
-all of them, or type a street name to find the bus stops on it.
+Nine modes, switchable from the header and remembered in the link: Underground,
+Elizabeth line, Overground, DLR, National rail, Buses, Cable car, Cycles, River.
+
+Search is fuzzy — it matches the letters of your query in order anywhere in a
+station's name, so `kngs crs` finds King's Cross. Type a street name to find the
+bus stops on it, or the rail station beside it.
+
+TfL publishes no departure data for national rail, so choosing one of those
+stations says so rather than showing an empty board.
 
 ## Stations
 

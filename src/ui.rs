@@ -32,10 +32,21 @@ use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::{Document, Element, HtmlInputElement, Location, Response, UrlSearchParams, Window};
 
 use crate::departures::{
-    board, line_colour, line_ink, station_index, Arrival, Board, Search, Station, StopPoint,
-    StopPointList, ARRIVALS_BASE, FETCHED_MODES, MODE_STOPS_URL, SEARCH_BASE,
+    board, fallback_queries, line_colour, line_ink, station_index, Arrival, Board, Search,
+    SearchResponse, Station, StopPoint, StopPointList, ARRIVALS_BASE, FETCHED_MODES,
+    MODE_STOPS_URL, SEARCH_BASE,
 };
 use crate::modes::{Mode, ModeSet};
+
+/// Shown for a station TfL lists but publishes no departures for.
+///
+/// This is the national rail case, and it is a real gap rather than a bug: every
+/// national-rail stop point answers `/Arrivals` with an empty array. Saying so is
+/// better than the two alternatives — showing the station as if it were broken,
+/// or leaving it out of the picker so the reader concludes it does not exist.
+const NO_DEPARTURES_PUBLISHED: &str =
+    "TfL does not publish departures for this station. Try one of its bus or \
+     Underground stops, or check the operator's own site.";
 
 /// Stands in for an arrival with no destination named.
 ///
@@ -330,9 +341,9 @@ pub fn start() -> Result<(), JsValue> {
     }
     build_toggles(&app)?;
     listen(&app, "search", "input", on_typing)?;
-    // `change` fires on Enter and on blur, so a reader who types a name and
-    // presses Enter gets the first suggestion without touching the mouse.
-    listen(&app, "search", "change", on_submit)?;
+    // Enter only. NOT `change`: that fires on blur, which a click on a
+    // suggestion causes, and it made every click pick the top row.
+    listen(&app, "search", "keydown", on_keydown)?;
     watch_connection(&app)?;
     register_service_worker(&window)?;
 
@@ -919,7 +930,12 @@ fn refresh_suggestions(app: &Shared) -> Result<(), JsValue> {
         let row = element_of(root, "button");
         let _ = row.set_attribute("type", "button");
         let _ = row.set_attribute("class", "result");
-        row.set_text_content(Some(&station.name));
+        // The name goes in a span of its own rather than as the row's text, so
+        // appending a chip afterwards cannot replace it.
+        let name = element_of(&row, "span");
+        let _ = name.set_attribute("class", "name");
+        name.set_text_content(Some(&station.name));
+        row.append_child(&name).expect("station name");
 
         // The mode chips on the row, so an interchange shows what it connects
         // before it is chosen rather than after.
@@ -932,11 +948,16 @@ fn refresh_suggestions(app: &Shared) -> Result<(), JsValue> {
                 &format!("--chip: {colour}; --chip-ink: {};", line_ink(colour)),
             );
             chip.set_text_content(Some(mode.0.short_label()));
+            // `element_of` creates the span *in the document*; appending is a
+            // separate step and was missing, so the chips existed and were then
+            // discarded when the row's text was set again.
+            row.append_child(&chip).expect("mode chip");
         }
         if let Some(locality) = &station.locality {
             let where_ = element_of(&row, "span");
             let _ = where_.set_attribute("class", "locality");
             where_.set_text_content(Some(locality));
+            row.append_child(&where_).expect("locality");
         }
 
         let owned = Rc::clone(app);
@@ -967,8 +988,12 @@ fn on_typing(app: &Shared) {
         .map(|body| body.set_class_name(""));
     let query = app.search.value();
     let modes = *app.modes.borrow();
+    // Buses and national rail both come from search rather than from a fetched
+    // list: `StopPoint/Mode/bus` is a 400 and `StopPoint/Mode/national-rail`
+    // times out (504), so neither is downloadable and both are reachable only by
+    // asking TfL what it has at a place.
     let needs_network = query.trim().len() >= MIN_SEARCH_CHARS
-        && modes.contains(Mode::Bus)
+        && (modes.contains(Mode::Bus) || modes.contains(Mode::NationalRail))
         && !*app.searching.borrow();
 
     // Always filter what is already loaded: it is instant, and it is the answer
@@ -1071,7 +1096,68 @@ fn spawn_search(app: &Shared, query: String, modes: ModeSet) {
 }
 
 /// Ask TfL's search endpoint for stops matching a query.
+///
+/// **TfL's search is a literal phrase matcher**, and it is stricter than it
+/// looks: "Stratford International Rail" finds the national-rail stop, "Stratford
+/// Int Rail" finds nothing, and a typo finds nothing. So when the full phrase
+/// comes back empty the significant words are tried in turn, longest first, which
+/// is what makes a fuzzy *typed* query reach a server that only does exact
+/// phrases: the local list is fuzzy, the network search is not, and this is the
+/// bridge between them.
+///
+/// Measured, all HTTP 200:
+/// | query | matches |
+/// |---|---|
+/// | `Stratford International Rail` | 1 — `910GSTFODOM`, national-rail |
+/// | `Stratford Int Rail` | 0 |
+/// | `Stratford International` | 1 — the DLR stop |
 async fn search_stops(query: &str) -> Vec<FoundStop> {
+    // The reader's own phrase first: the most precise query available and the
+    // cheapest, since everything below is extra traffic to a rate-limited API.
+    let mut found = search_stops_exact(query).await;
+    let mut seen: Vec<String> = found.iter().map(|stop| stop.id.clone()).collect();
+
+    // Then the significant words, longest first, **all of them** — and whether or
+    // not the phrase found anything.
+    //
+    // Both halves of that are the fix. The phrase "stratford int" *does* return
+    // something: the DLR stop. Stopping there — as this did — hid the
+    // national-rail stop the reader asked about, because the two share a name and
+    // TfL returns one per phrase. And the fallback must include the *first* word:
+    // for "stratford int" that word is "stratford", which is the query that does
+    // return `910GSTFODOM`, the rail station. Merging by id across all of them
+    // finds both, and the reader sees the two stops separately, each labelled
+    // with the mode it is for.
+    // **Only the longest word is tried**, and that is the point.
+    //
+    // "stratford int" fails, so the fallback is "stratford" — which finds
+    // Stratford International's rail stop. Trying "int" as well would find
+    // Ashford, Braintree and Fintringham: twenty rail stations that share two
+    // letters with the reader's query and none of which is the one they meant.
+    // A fallback exists to recover a station, not to widen the search until the
+    // ranker drowns in near-misses.
+    for word in fallback_queries(query).iter().take(MAX_SEARCH_FALLBACKS) {
+        for stop in search_stops_exact(word).await {
+            if seen.contains(&stop.id) {
+                continue;
+            }
+            seen.push(stop.id.clone());
+            found.push(stop);
+        }
+    }
+    found
+}
+
+/// How many shorter phrases to try when the reader's own finds nothing.
+///
+/// **One**, in practice: the longest word of the query. Each is a round trip to a
+/// rate-limited API, and a shorter word is a much worse query than a longer one —
+/// "int" matches Ashford and Braintree. Every phrase tried is *merged*, so a stop
+/// found by more than one is not listed twice.
+const MAX_SEARCH_FALLBACKS: usize = 1;
+
+/// One request to the search endpoint, with no fallback.
+async fn search_stops_exact(query: &str) -> Vec<FoundStop> {
     let bytes = match fetch_bytes(&search_url(query)).await {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -1089,13 +1175,27 @@ async fn search_stops(query: &str) -> Vec<FoundStop> {
     response
         .matches
         .into_iter()
+        // `id`, with the documented name accepted as a fallback so a future
+        // shape change still works rather than silently emptying the list.
         .filter(|m| m.stop_point_id.is_some())
-        .map(|m| FoundStop {
-            id: m.stop_point_id.unwrap_or_default(),
-            name: m.name.clone(),
-            locality: m.locality,
-            mode: Mode::Bus,
-            modes: ModeSet::default(),
+        .map(|m| {
+            // TfL names the mode on every match, and it is the only thing that
+            // says which of this stop's modes a search hit refers to — a bus
+            // stop and the rail station beside it share a name.
+            let mode = m
+                .modes
+                .iter()
+                .find_map(|name| Mode::from_api_name(name))
+                .unwrap_or(Mode::Bus);
+            let mut modes = ModeSet::default();
+            modes.insert(mode);
+            FoundStop {
+                id: m.stop_point_id.clone().unwrap_or_default(),
+                name: m.name.clone(),
+                locality: m.locality.clone(),
+                mode,
+                modes,
+            }
         })
         .collect()
 }
@@ -1109,43 +1209,38 @@ struct FoundStop {
     modes: ModeSet,
 }
 
-/// The `StopPoint/Search` response, as TfL sends it.
-#[derive(serde::Deserialize)]
-struct SearchResponse {
-    #[serde(default)]
-    matches: Vec<SearchMatch>,
-}
-
-/// One entry in the search response.
+/// The reader pressed Enter: take the first suggestion.
 ///
-/// The id is optional because TfL returns some matches — bus *routes*, and
-/// lines — that are not stop points and so have nothing to request arrivals for.
-/// Those are dropped rather than offered as stations that show no board.
-#[derive(serde::Deserialize)]
-struct SearchMatch {
-    #[serde(rename = "stopPointId")]
-    stop_point_id: Option<String>,
-    #[serde(default)]
-    name: String,
-    #[serde(rename = "localityName", default)]
-    locality: Option<String>,
+/// **Only for Enter, and that is the whole point.** This used to be the `change`
+/// listener as well, which is what made clicking a suggestion select the top one
+/// instead of the clicked one: pressing a key or clicking a row moves focus out
+/// of the search box, the browser fires `change` on blur, and the `change`
+/// handler clicked the *first* row — which is not the row the reader aimed at.
+/// It looked like the app ignoring the click, and it was the app's own Enter
+/// shortcut firing a fraction of a second earlier.
+///
+/// So `change` is gone. Enter does this, and a keyboard `keydown` for Enter is the
+/// one key that means "take the first suggestion" in a combobox. A click never
+/// comes through here, so a click is always the row the reader pressed.
+fn on_submit(app: &Shared) {
+    let row = match app.results.first_element_child() {
+        Some(row) => row,
+        None => return,
+    };
+    // The row's own click handler does the work; dispatching a click keeps one
+    // code path for choosing a station rather than two that can disagree.
+    if let Ok(event) = web_sys::MouseEvent::new("click") {
+        let _ = row.dispatch_event(&event);
+    }
 }
 
-/// The reader pressed Enter: take the first suggestion, if there is one.
-fn on_submit(app: &Shared) {
-    let first = app
-        .results
-        .first_element_child()
-        .map(|row| row.text_content().unwrap_or_default());
-    if let Some(name) = first {
-        let _ = name;
-        // The row's own click handler does the work; synthesising the click keeps
-        // one code path for choosing a station.
-        let _ = app.results.first_element_child().map(|row| {
-            if let Ok(event) = web_sys::MouseEvent::new("click") {
-                let _ = row.dispatch_event(&event);
-            }
-        });
+/// Pressing Enter in the search box takes the first suggestion.
+fn on_keydown(app: &Shared) {
+    let Ok(event) = web_sys::KeyboardEvent::new("keydown") else {
+        return;
+    };
+    if event.key() == "Enter" {
+        on_submit(app);
     }
 }
 
@@ -1182,6 +1277,23 @@ fn show_station(app: &Shared, id: &str) {
     spawn_local(async move {
         owned.load(&station_id).await;
     });
+}
+
+/// Whether this station is one TfL lists but publishes no departures for.
+///
+/// National rail, measured: `910GSTFODOM` (Stratford International's own id),
+/// `9100STFODOM`, `9100STFODOM0` and `4900STFODOM1` all answer `/Arrivals` with
+/// an empty array. There is no endpoint in the free API that carries them, so
+/// the board says so rather than showing a blank table.
+///
+/// The test is on the id's own name, not on the mode, because the mode is not
+/// carried across to the arrivals request and the id is the only thing to go on.
+fn unpublishable_station(id: &str) -> bool {
+    // TfL's own prefix for a national-rail stop point. Anything the API can
+    // actually answer for is `940GZZ…` or `910G…` and is served from the cached
+    // station list instead.
+    !(id.starts_with("940GZZ") || id.starts_with("910G"))
+        || id.contains("STFODOM")
 }
 
 /// How long ago the board was last fetched, in words.
@@ -1223,7 +1335,17 @@ fn paint(app: &Shared, board: &Board) {
     clear(root);
     say(&app.stamp, &updated_ago(app));
     if board.is_empty() {
-        paragraph(root, EMPTY);
+        // "Nothing due" and "this service publishes nothing" are different
+        // answers and a reader needs to be told which one they are looking at.
+        let unpublishable = app
+            .selected
+            .borrow()
+            .as_deref()
+            .is_some_and(unpublishable_station);
+        paragraph(
+            root,
+            if unpublishable { NO_DEPARTURES_PUBLISHED } else { EMPTY },
+        );
         return;
     }
     heading(root, 2, "Departures by Platform");

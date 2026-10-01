@@ -110,6 +110,9 @@ h1 {
 #notice { margin: 4px 0 0; font-size: 11px; color: var(--dim); min-height: 15px; }
 
 /* --- the mode toggles: one row, always visible, the app's main switch --- */
+/* Nine toggles, and the point is that they must stay on the screen rather than
+   become a menu: a mode a reader cannot see is a mode they will not think to
+   turn on. They wrap onto a second row on a phone rather than scrolling off. */
 #toggles { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0 6px; }
 .toggle {
   --chip: #444; --chip-ink: #fff;
@@ -117,16 +120,17 @@ h1 {
   align-items: center;
   gap: 5px;
   min-height: 28px;
-  padding: 3px 9px;
+  padding: 3px 8px;
   border: 1px solid var(--rule);
   border-radius: 14px;
   background: var(--panel);
   color: var(--dim);
   font: inherit;
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
   user-select: none;
+  white-space: nowrap;
 }
 .toggle::before {
   content: "";
