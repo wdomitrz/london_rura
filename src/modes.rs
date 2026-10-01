@@ -36,6 +36,23 @@ pub enum Mode {
     Cycle,
     /// The Thames Clippers river bus.
     River,
+    /// National rail: the mainline stations inside London.
+    ///
+    /// **No departure data.** TfL's free API lists these stations — they come
+    /// back from `StopPoint/Search` with `"modes": ["national-rail"]` — but
+    /// every one of their ids answers `/Arrivals` with an empty array. Measured
+    /// at Stratford International, the station the app was asked about: the
+    /// parent `910GSTFODOM`, the child `9100STFODOM`, the numbered
+    /// `9100STFODOM0` and the bus-side `4900STFODOM1` all return `[]` with HTTP
+    /// 200. There is no endpoint in the free API that answers the question, and
+    /// inventing one would be worse than saying so.
+    ///
+    /// So the mode exists and the stations exist, and choosing one says plainly
+    /// that TfL does not publish its departures. That is a better outcome than
+    /// Stratford International being absent: a reader asking about it is told the
+    /// truth about this service, rather than shown a picker with no entry and no
+    /// explanation.
+    NationalRail,
 }
 
 /// Every mode, in the order the toggle shows them.
@@ -48,6 +65,7 @@ pub const MODES: &[Mode] = &[
     Mode::Elizabeth,
     Mode::Overground,
     Mode::Dlr,
+    Mode::NationalRail,
     Mode::Bus,
     Mode::Cable,
     Mode::Cycle,
@@ -71,6 +89,7 @@ impl Mode {
             Mode::Cable => "cable-car",
             Mode::Cycle => "cycle",
             Mode::River => "river",
+            Mode::NationalRail => "national-rail",
         }
     }
 
@@ -85,6 +104,7 @@ impl Mode {
             Mode::Cable => "Cable car",
             Mode::Cycle => "Cycles",
             Mode::River => "River",
+            Mode::NationalRail => "National rail",
         }
     }
 
@@ -99,6 +119,7 @@ impl Mode {
             Mode::Cable => "Cable",
             Mode::Cycle => "Cycle",
             Mode::River => "River",
+            Mode::NationalRail => "National rail",
         }
     }
 
@@ -118,6 +139,7 @@ impl Mode {
             Mode::Cable => "#E21836",
             Mode::Cycle => "#4B4E54",
             Mode::River => "#0094D4",
+            Mode::NationalRail => "#1B3A6B",
         }
     }
 
@@ -139,6 +161,7 @@ impl Mode {
             Mode::Cable => "Ca",
             Mode::Cycle => "Cy",
             Mode::River => "R",
+            Mode::NationalRail => "N",
         }
     }
 
@@ -201,7 +224,13 @@ impl ModeSet {
     /// keeps a time with nobody waiting for it.
     pub fn default_on() -> Self {
         let mut set = Self::empty();
-        for mode in [Mode::Tube, Mode::Elizabeth, Mode::Overground, Mode::Dlr] {
+        for mode in [
+            Mode::Tube,
+            Mode::Elizabeth,
+            Mode::Overground,
+            Mode::Dlr,
+            Mode::NationalRail,
+        ] {
             set.insert(mode);
         }
         set
@@ -267,5 +296,6 @@ fn mode_index(mode: Mode) -> u32 {
         Mode::Cable => 5,
         Mode::Cycle => 6,
         Mode::River => 7,
+        Mode::NationalRail => 4,
     }
 }

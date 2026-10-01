@@ -201,6 +201,50 @@ merged into the station list, so they are searchable afterwards rather than bein
 a suggestion the reader has to catch. Typing is debounced by 250 ms, so "barking"
 is one request rather than seven.
 
+## Three bugs this rewrite found by looking at the page
+
+All three were invisible to the test suite, and the first two cost a real user
+their app. They are written up because the shape of them is worth recognising.
+
+### 1. Clicking a suggestion chose the top one
+
+The search box was wired to `change`, and `change` fires when a search box loses
+focus — which is what happens when the reader presses a suggestion. The `change`
+handler clicked the **first** suggestion, a fraction of a second before the
+reader's own click landed. Every click on a suggestion therefore selected
+whatever was at the top of the list, and the app looked like it was ignoring the
+click.
+
+`change` is gone. `keydown` for Enter is the whole of it, because Enter is the one
+key that means "take the first suggestion" in a combobox. A click never comes
+through that path.
+
+### 2. Search found nothing at all, ever
+
+`StopPoint/Search` sends **`id`**, not the documented `stopPointId`. Deserialising
+the documented name left every match without an id, the `is_some()` filter
+dropped all of them, and search returned nothing — **with every HTTP status at
+200**. It looks exactly like a search that has no results for what you typed.
+
+This is the *same* mistake as the stop-point list (§"the stop-point list sends
+`id`"), in a different endpoint, and it survived a release. `SearchMatch` now
+lives in `departures.rs` with a host-runnable test that asserts a real response
+keeps its id and that the documented name would find nothing.
+
+### 3. Fuzzy search, and what "fuzzy" does not mean
+
+The search was prefix-and-word matching, so `ark` found nothing in `Barking` and
+`stfint` found nothing at all. It now ranks four ways, the lowest being a
+**subsequence**: the query's characters, in order, anywhere. `kngs crs` finds
+King's Cross; `brxton` finds Brixton.
+
+A subsequence is not edit distance, and the limit is worth stating: a
+**transposition** — `brikton` for `brikton` → `britkton` — does not match, because
+the characters are the right ones in the wrong order. Fixing that needs
+edit-distance scoring over ~2,700 stations on every keystroke, which is the wrong
+trade for a field that has to feel instant. Dropped letters, missing vowels and
+wrong order-of-words all work; a swapped pair does not.
+
 ## The TfL API, measured
 
 Everything here was measured against the live API on 2026-09-30, not read off
@@ -259,7 +303,34 @@ trains, `0400ZZLUAMS0` returns none. So an id being present in a stop-point list
 is **no evidence it is worth requesting** — `is_requestable` is the predicate
 that stands between a station appearing in the picker and it having a board.
 
-**5. The stop-point list sends `id`, not `stopPointId`.** The older TfL Unified
+**5. `StopPoint/Search` also sends `id`, not `stopPointId`** — and is a *literal
+phrase matcher*, not a fuzzy one. Measured, all HTTP 200:
+
+| query | matches |
+|---|---|
+| `Stratford International Rail` | 1 — `910GSTFODOM`, national-rail |
+| `Stratford International` | 1 — the DLR stop |
+| `Stratford Int Rail` | 0 |
+| `Stratford` | 20, including `910GSTFODOM` |
+
+So the local search is fuzzy and the network search is not, and the gap is
+bridged by falling back to the **longest word** of the query: for "stratford int"
+that is "stratford", which finds the rail stop. Falling back to "int" instead
+would find Ashford, Braintree and Fintringham. `fallback_queries` encodes that
+ordering and is tested on the host.
+
+**6. National rail has no departure data at all.** Every national-rail stop point
+answers `/Arrivals` with an empty array. Measured at Stratford International:
+the parent `910GSTFODOM`, the child `9100STFODOM`, the numbered `9100STFODOM0`
+and the bus-side `4900STFODOM1` all return `[]`. `StopPoint/Mode/national-rail`
+is a **504** and `StopPoint/Mode/national-rail,tube` is a **500**.
+
+So the mode exists, the stations exist, and choosing one says so plainly rather
+than showing a blank board. That is better than leaving Stratford International
+out of the picker: a reader asking about it now learns something true about this
+service instead of concluding it does not exist.
+
+**7. The stop-point list sends `id`, not `stopPointId`.** The older TfL Unified
 API documentation shows `stopPointId`; the live endpoint does not send it, and
 of 1,858 stop points, **zero** carry it. Deserialising that name leaves every
 id as the empty string, every id fails the prefix test, and the picker is
