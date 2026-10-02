@@ -1,0 +1,5 @@
+target/
+# Build output of `london_rura`. Written by the two-step build in AGENTS.md
+# (wasm-bindgen, then build.rs), reproducible from the committed sources, and
+# never committed -- `tests/shell.rs` asserts it.
+dist/

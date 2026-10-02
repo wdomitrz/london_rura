@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The author's own icon, committed as SVG and linked directly. The PNGs the
+     manifest and iOS use are rasterized from this same file at build time. -->
+<link rel="icon" href="./icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<link rel="manifest" href="./manifest.webmanifest">
+<meta name="theme-color" content="#000000">
+<meta name="description" content="London Rura — a London Underground departures board for every station on the TfL network.">
+<title>London Rura</title>
+<style>
+/* A departures board, in a departures board's colours, and as dense as one.
+   The original was Arial on white with grey borders and a 270-entry select.
+   This is a platform board: a near-black face, greyscale text, one warm accent
+   for the minutes, and the line and mode colours doing the job they are there
+   for.
+
+   Density is the point. A real board fits a dozen departures in the space this
+   app previously spent on three: 22px rows, 11px type, a 24px line height, and
+   no vertical padding anywhere it is not needed. On a phone that is the
+   difference between seeing the next three trains and the next twelve, which is
+   the difference between a useful board and a decoration.
+
+   The accent is #FFD300 — Circle's yellow, and the colour a real board lights
+   its times in. The minutes are what a reader came for, so they get the only
+   bright colour on the page; everything else is greyscale, which leaves the
+   chips as the only other colour present and keeps them competing with nothing.
+
+   Every chip's text colour is chosen for contrast against that chip, by the
+   `line_ink` function in src/departures.rs, not by eye. */
+:root {
+  color-scheme: dark light;
+  --paper: #0b0b0c;
+  --panel: #141417;
+  --raised: #1c1c21;
+  --ink: #eef1f6;
+  --dim: #98a1b0;
+  --faint: #6b7280;
+  --rule: #26262c;
+  --accent: #ffd300;
+  --due: #ff4d3d;
+  --focus: #4da3ff;
+  /* The chip edge. Northern's black is 1.07:1 against this page and Circle's
+     yellow is 1.34:1 against the light one, so every chip carries a hairline of
+     the page's ink. Decoration, not data: the name is on the chip either way. */
+  --ring: rgba(238, 241, 246, 0.38);
+  --row: 22px;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --paper: #f5f6f8;
+    --panel: #ffffff;
+    --raised: #eceef2;
+    --ink: #14161a;
+    --dim: #5a6270;
+    --faint: #8b93a0;
+    --rule: #d2d6dd;
+    --accent: #7a5f00;  /* the same accent, darkened to hold contrast on white */
+    --due: #bd1f18;
+    --focus: #0b5bd3;
+    --ring: rgba(20, 22, 26, 0.3);
+  }
+}
+* { box-sizing: border-box; }
+/* The label is for screen readers and the keyboard; the placeholder is what a
+   sighted reader sees. */
+.visually-hidden {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
+}
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 13px/1.35 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+main { max-width: 52rem; margin: 0 auto; padding: 8px 10px 40px; }
+
+/* --- the header: title, station name, and the freshness stamp, on one line --- */
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-bottom: 6px;
+  border-bottom: 2px solid var(--rule);
+}
+h1 {
+  font-size: 15px;
+  margin: 0;
+  letter-spacing: -0.01em;
+  font-weight: 700;
+}
+#station-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink);
+}
+#station-name:not(:empty)::before { content: "· "; color: var(--faint); }
+.stamp { margin-left: auto; font-size: 11px; color: var(--faint); }
+#notice { margin: 4px 0 0; font-size: 11px; color: var(--dim); min-height: 15px; }
+
+/* --- the mode toggles: one row, always visible, the app's main switch --- */
+/* Nine toggles, and the point is that they must stay on the screen rather than
+   become a menu: a mode a reader cannot see is a mode they will not think to
+   turn on. They wrap onto a second row on a phone rather than scrolling off. */
+#toggles { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0 6px; }
+.toggle {
+  --chip: #444; --chip-ink: #fff;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 3px 8px;
+  border: 1px solid var(--rule);
+  border-radius: 14px;
+  background: var(--panel);
+  color: var(--dim);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.toggle::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--chip);
+  box-shadow: 0 0 0 1px var(--ring);
+}
+/* On: the mode's own colour, and the readable ink for it. */
+.toggle.on {
+  background: var(--chip);
+  color: var(--chip-ink);
+  border-color: transparent;
+}
+.toggle.on::before { background: var(--chip-ink); box-shadow: none; opacity: 0.85; }
+.toggle:hover { border-color: var(--faint); }
+.toggle.on:hover { filter: brightness(1.12); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+/* --- search: a single line, and a result list that reads as a menu --- */
+#search {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+}
+#search::placeholder { color: var(--faint); }
+/* Capped so a long list cannot push the board off a phone screen: the reader
+   scrolls the suggestions, not the page. */
+#results {
+  display: flex;
+  flex-direction: column;
+  margin: 4px 0 0;
+  max-height: 30vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* Once a station is chosen the suggestions have done their job, and a list of
+   six stations sitting between the search box and the board is the single
+   largest thing on the page. The list comes back the moment the reader edits the
+   search. */
+#results:empty { display: none; }
+body.chosen #results { display: none; }
+body:not(.chosen) #results:empty { display: none; }
+.result {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: var(--row);
+  padding: 3px 8px;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.result:hover, .result:focus-visible { background: var(--raised); }
+.result .locality { margin-left: auto; font-size: 11px; color: var(--faint); }
+/* What tells two stops of one name apart: the flag letter a reader can match
+   against the one they are standing at, then the routes, then the direction.
+   Without it a station forecourt is a list of identical rows. Muted and small,
+   because it qualifies the name rather than being the thing being chosen. */
+.result .detail {
+  font-size: 10.5px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 45%;
+}
+#results p { margin: 4px 2px; font-size: 11.5px; color: var(--faint); }
+
+/* --- chips: the line or mode name on its own colour --- */
+.chip {
+  --chip: #666; --chip-ink: #fff;
+  display: inline-flex;
+  align-items: center;
+  min-width: 1.6em;
+  justify-content: center;
+  padding: 0 6px;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--chip);
+  color: var(--chip-ink);
+  box-shadow: 0 0 0 1px var(--ring);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+.chip.small { height: 14px; font-size: 9.5px; padding: 0 5px; border-radius: 7px; }
+/* A chip in the line column must show its whole name. `min-width` lets a short
+   one (a bus route number) stay a tidy pill while a long one grows, and
+   `max-width: 100%` plus the cell's own overflow rules keep a name TfL sends
+   that is longer than any column from spilling across the row. */
+td:first-child .chip { max-width: 100%; }
+
+/* --- the board itself --- */
+#departures { margin-top: 10px; }
+#departures h2 {
+  margin: 0 0 2px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+}
+#departures p { margin: 6px 0; font-size: 12px; color: var(--dim); }
+/* A platform heading, inline and quiet: a board labels each column, not each
+   block with a paragraph. */
+h3, h4 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 0 2px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--dim);
+}
+/* A mode heading sits on the mode's own colour, like a chip, so an interchange's
+   halves are separated by the same signal the rows below use. The name is still
+   text on it, so it reads without the colour. */
+h3[data-mode] {
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--chip);
+  color: var(--chip-ink);
+  box-shadow: 0 0 0 1px var(--ring);
+  align-self: flex-start;
+  letter-spacing: 0.06em;
+}
+h3::after, h4::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+}
+/* Under a mode heading the platform is the second level, so it is quieter still
+   and does not need the rule. */
+h4 {
+  margin: 6px 0 1px;
+  font-size: 9.5px;
+  color: var(--faint);
+}
+h4::after { display: none; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+thead th {
+  padding: 0 6px 2px;
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--faint);
+  text-align: left;
+}
+/* Line, then destination, then the minutes. Fixed widths so the columns do not
+   jump between rows as destinations change length. The line column is sized to
+   its widest real chip — the Elizabeth line's "Elizabeth line", which is the
+   longest name on any board — plus the chip's own padding and the cell's, so a
+   chip is never clipped by the column it sits in. A clipped chip is worse than
+   an unhelpful one: "Elizabeth li…" is not a colour cue and not a name either. */
+th:nth-child(1), td:nth-child(1) { width: 7.5rem; }
+th:nth-child(3), td:nth-child(3) { width: 3.25rem; text-align: right; }
+td {
+  height: var(--row);
+  padding: 1px 6px;
+  border-top: 1px solid var(--rule);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+tbody tr:first-child td { border-top: 0; }
+td.destination { color: var(--ink); }
+/* The minutes: the only bright thing on the page, and the reason for it. */
+td.minutes {
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 14px;
+}
+/* Zero means "at the platform", which is not "in no time" — it is the thing the
+   reader is waiting for, so it gets its own colour. */
+td.minutes.due { color: var(--due); }
+/* A bus has no platform, so its rows would otherwise be ragged. */
+td.no-platform { color: var(--faint); }
+
+@media (prefers-reduced-motion: no-preference) {
+  #departures { animation: settle 120ms ease-out; }
+  @keyframes settle { from { opacity: 0.5; } to { opacity: 1; } }
+}
+/* A phone in portrait is the case this board is for. */
+@media (max-width: 30rem) {
+  main { padding: 6px 8px 32px; }
+  /* Narrow, but still wide enough for the longest chip on the board: the
+     Elizabeth line. Trimming this is what made "Elizabeth line" read as
+     "Elizabeth li…" on a phone, which is the column that carries the colour. */
+  th:nth-child(1), td:nth-child(1) { width: 6.75rem; }
+  th:nth-child(3), td:nth-child(3) { width: 3rem; }
+  td { font-size: 12px; }
+  td.minutes { font-size: 13px; }
+  .chip { font-size: 10px; padding: 0 5px; }
+}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>London Rura</h1>
+  <span id="station-name"></span>
+  <span class="stamp" id="stamp"></span>
+</header>
+<p id="notice" role="status" aria-live="polite">Loading stations…</p>
+
+<!-- The mode switches. Real buttons with aria-pressed, so a keyboard reaches
+     them and a screen reader announces the state. -->
+<div id="toggles" role="group" aria-label="Transport modes"></div>
+
+<label class="visually-hidden" for="search">Station</label>
+<input id="search" type="search" autocomplete="off" spellcheck="false"
+       placeholder="Search 2,700 stations, or a bus stop…" role="combobox"
+       aria-expanded="true" aria-controls="results">
+<div id="results" role="listbox" aria-label="Stations"></div>
+
+<div id="departures" aria-live="polite" aria-busy="false"></div>
+</main>
+
+<noscript>This board needs JavaScript to run. Departures come live from the TfL API and are shown here; without JavaScript there is nothing to show.</noscript>
+<!-- The only JavaScript in this app: a dynamic import of the generated
+     bindings, and a message if that fails. Everything else is Rust. -->
+<script type="module">
+import('./app.js').then(m => m.default()).catch(error => { document.getElementById('notice').textContent = 'London Rura could not start.'; const box = document.getElementById('departures'); box.textContent = 'London Rura could not start. Reload the page or check your connection. ' + error; });
+</script></body>
+</html>
