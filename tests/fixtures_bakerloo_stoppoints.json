@@ -1,0 +1,38 @@
+[
+ {
+  "$type": "TflStopPoint",
+  "id": "940GZZLUPCC",
+  "commonName": "Piccadilly Circus Underground Station",
+  "localityName": null,
+  "modes": [
+   "tube"
+  ]
+ },
+ {
+  "$type": "TflStopPoint",
+  "id": "940GZZLUBST",
+  "commonName": "Baker Street Underground Station",
+  "localityName": null,
+  "modes": [
+   "tube"
+  ]
+ },
+ {
+  "$type": "TflStopPoint",
+  "id": "940GZZLUCHX",
+  "commonName": "Charing Cross Underground Station",
+  "localityName": null,
+  "modes": [
+   "tube"
+  ]
+ },
+ {
+  "$type": "TflStopPoint",
+  "id": "940GZZLUERB",
+  "commonName": "Edgware Road (Bakerloo) Underground Station",
+  "localityName": null,
+  "modes": [
+   "tube"
+  ]
+ }
+]

@@ -1,0 +1,38 @@
+[
+ {
+  "$type": "TflStopPoint",
+  "id": "940GZZLUPCC",
+  "commonName": "Piccadilly Circus Underground Station",
+  "localityName": null,
+  "modes": [
+   "tube"
+  ]
+ },
+ {
+  "$type": "TflStopPoint",
+  "id": "940GZZLUACT",
+  "commonName": "Acton Town Underground Station",
+  "localityName": null,
+  "modes": [
+   "tube"
+  ]
+ },
+ {
+  "$type": "TflStopPoint",
+  "id": "940GZZLUALP",
+  "commonName": "Alperton Underground Station",
+  "localityName": null,
+  "modes": [
+   "tube"
+  ]
+ },
+ {
+  "$type": "TflStopPoint",
+  "id": "940GZZLUASG",
+  "commonName": "Arnos Grove Underground Station",
+  "localityName": null,
+  "modes": [
+   "tube"
+  ]
+ }
+]
