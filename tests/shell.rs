@@ -1680,16 +1680,72 @@ fn only_master_can_reach_the_live_site() {
          nor the environment, and the trigger belongs to build.yml",
     );
 
-    // The deploy job's gate, read from the job it belongs to, so the assertion
-    // cannot be satisfied by a gate on some other job. This is the check that
-    // actually holds when the trigger is widened by accident.
+    // The deploy job's gate, read from the job it belongs to so the assertion
+    // cannot be satisfied by a gate on some other job, and read with comments
+    // stripped: the comment block above the `if:` names both halves of the
+    // condition while explaining it, so a comment-stripping assertion that read
+    // the raw file would be satisfied by the prose alone. That is not
+    // hypothetical: it is how the `RUSTFLAGS` assertion in this same file was
+    // shipped, and it shipped.
+    //
+    // This is the check that actually holds when the trigger is widened by
+    // accident.
     let deploy_job = live
         .split("\n  deploy:")
         .nth(1)
         .expect("pages.yml must have a `deploy:` job");
+    // The gate itself, taken as one line: the `if:` of the `deploy` job and
+    // nothing else. Read it out rather than searched for across the file, so a
+    // second `if:` on some other job cannot satisfy this.
+    let live_gate = live
+        .split("\n  deploy:")
+        .nth(1)
+        .and_then(|job| job.split_once("\n    if:").map(|(_, after)| after))
+        .and_then(|after| after.lines().next())
+        .expect("the `deploy` job must have an `if:` gate");
     assert!(
-        deploy_job.contains("if:") && deploy_job.contains("github.ref == 'refs/heads/master'"),
-        "the `deploy` job must be gated on the build being for master",
+        live_gate.contains("github.ref == 'refs/heads/master'"),
+        "the `deploy` job must be gated on the build being for master (found: {live_gate:?})",
+    );
+    // ... and it must ALSO be gated on not being a fork. This file is
+    // byte-identical in `wdomitrz/london_rura` and in its fork
+    // `bot-git-ai/london_rura`, so a gate that tests only the branch name
+    // cannot tell the two repositories apart: both have a `master`, and a push
+    // to the fork's master would try to publish. Two things then go wrong, and
+    // the first is the one that happens. A fork has no Pages site of its own
+    // until someone enables one by hand, so every push to fork master dies
+    // with "Creating Pages deployment failed ... Ensure GitHub Pages has been
+    // enabled" — a red run per push. And if Pages were enabled there, the fork
+    // would serve its own copy, which drifts from the published site as soon as
+    // the two masters diverge.
+    //
+    // `github.event.repository.fork` is the discriminator because it needs no
+    // configuration: it is supplied by the event, false upstream and true in
+    // the fork. The obvious alternative, a repository Actions variable, has
+    // the failure mode this assertion exists to prevent — it would have to be
+    // set on the *upstream* repository to publish, and no account but the
+    // user's can do that, so the gate would ship as silently off on the one
+    // repository where it matters.
+    assert!(
+        live_gate.contains("!github.event.repository.fork"),
+        "the `deploy` job must also be gated on `!github.event.repository.fork`; this \
+         workflow is byte-identical in the fork `bot-git-ai/london_rura`, so a \
+         branch-name-only gate publishes from the fork too — failing with 'Ensure GitHub \
+         Pages has been enabled' until Pages is enabled there, and serving a divergent \
+         copy afterwards (found: {live_gate:?})",
+    );
+    // The two halves are one condition, not two jobs: an `if:` per job would be
+    // an AND across two independent gates, and a `build`-job gate would silently
+    // stop the *build* from running on the fork rather than just its publish,
+    // which is the opposite of what this is for. One `if:`, both halves.
+    let deploy_if_lines = deploy_job
+        .lines()
+        .filter(|line| line.trim_start().starts_with("if:"))
+        .count();
+    assert_eq!(
+        deploy_if_lines, 1,
+        "the two halves must be one `if:` on `deploy`, not a gate per job (found {deploy_if_lines} \
+         in the `deploy` job)",
     );
 
     // And the permissions that can actually publish must be scoped to that job
