@@ -83,8 +83,7 @@ const FAILED: &str = "Error fetching departures. Please try again later.";
 ///
 /// Measured on 2026-10-02: typing one eight-letter word into the search box
 /// produced 201 requests, and every one of them ended on `FAILED`.
-const RATE_LIMITED: &str =
-    "TfL is rate-limiting this app. Wait a few seconds and try again.";
+const RATE_LIMITED: &str = "TfL is rate-limiting this app. Wait a few seconds and try again.";
 
 /// Shown when a search matches nothing, on the board's own terms.
 ///
@@ -971,9 +970,7 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, FetchError> {
     let response = JsFuture::from(window.fetch_with_str(url))
         .await
         .map_err(|_| FetchError::Other)?;
-    let response: Response = response
-        .dyn_into()
-        .map_err(|_| FetchError::Other)?;
+    let response: Response = response.dyn_into().map_err(|_| FetchError::Other)?;
     if !response.ok() {
         // 429 is the one non-OK status that is this app's own doing rather
         // than TfL's, and it is worth distinguishing for exactly that reason.
@@ -983,13 +980,9 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, FetchError> {
             FetchError::Other
         });
     }
-    let buffer = JsFuture::from(
-        response
-            .array_buffer()
-            .map_err(|_| FetchError::Other)?,
-    )
-    .await
-    .map_err(|_| FetchError::Other)?;
+    let buffer = JsFuture::from(response.array_buffer().map_err(|_| FetchError::Other)?)
+        .await
+        .map_err(|_| FetchError::Other)?;
     // `to_vec` on the typed-array view is a single copy of the bytes out of
     // wasm memory, not a per-element crossing of the boundary.
     Ok(js_sys::Uint8Array::new(&buffer).to_vec())
@@ -1012,10 +1005,8 @@ async fn throttle() {
         return;
     }
     let promise = js_sys::Promise::new(&mut |resolve: js_sys::Function, _| {
-        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
-            resolve.as_ref(),
-            wait as i32,
-        );
+        let _ = window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(resolve.as_ref(), wait as i32);
     });
     let _ = JsFuture::from(promise).await;
 }
@@ -1742,7 +1733,7 @@ fn paint(app: &Shared, board: &Board) {
         // own colour, and only when the board holds more than one mode.
         if several_modes {
             if let Some(mode) = mode {
-                let title = heading(root, 3, &mode.label());
+                let title = heading(root, 3, mode.label());
                 let colour = mode.colour();
                 let _ = title.set_attribute(
                     "style",
