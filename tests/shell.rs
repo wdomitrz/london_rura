@@ -1372,3 +1372,117 @@ fn a_missing_destination_falls_back_to_what_tfl_actually_said() {
         "the towards field must be deserialised from the arrival"
     );
 }
+
+/// Every request to TfL waits its turn, because the API rate-limits.
+///
+/// **This is the fix for the wall of "Error fetching departures."** Measured on
+/// 2026-10-02: typing one eight-letter word into the search box produced 201
+/// requests, and TfL answers a burst with HTTP 429 — which the app reported with
+/// the same words it uses for a dead network, so a reader could not tell that the
+/// app had rate-limited itself.
+#[test]
+fn every_request_to_tfl_goes_through_the_throttle() {
+    let code = browser_code();
+    let fetch = code
+        .split("async fn fetch_bytes")
+        .nth(1)
+        .expect("fetch_bytes is in the browser layer")
+        .split("\n/// ")
+        .next()
+        .expect("the body of fetch_bytes");
+    assert!(
+        fetch.contains("throttle().await"),
+        "the one function that talks to TfL must wait its turn before it does. \
+         A caller that bypasses it can burst, and a burst is 429.\n--- \
+         fetch_bytes ---\n{fetch}"
+    );
+    // And the gap must be a real number, not a no-op yield.
+    let declared = code
+        .split("const TFL_REQUEST_GAP_MS")
+        .nth(1)
+        .and_then(|rest| rest.split('=').nth(1))
+        .and_then(|value| value.trim().split(';').next())
+        .expect("the request gap is stated as a constant")
+        .trim()
+        .to_string();
+    let gap = declared
+        .parse::<u32>()
+        .unwrap_or_else(|_| panic!("the gap must be a number of milliseconds, got {declared:?}"));
+    assert!(
+        gap > 0,
+        "a zero gap throttles nothing; measured 429s begin well under this traffic"
+    );
+}
+
+/// A rate limit is told apart from a dead network, because they are different
+/// problems and only one of them clears on its own.
+///
+/// TfL's own body for this is "Rate limit is exceeded. Try again in 7 seconds",
+/// so the reader is told a wait is what is needed, rather than being sent away
+/// to retry into the same limit.
+#[test]
+fn being_throttled_is_not_reported_as_a_dead_network() {
+    let code = browser_code();
+    assert!(
+        code.contains("FetchError::RateLimited"),
+        "a 429 must be recognised as its own failure"
+    );
+    assert!(
+        code.contains("response.status() == 429"),
+        "the 429 must be picked out of the response status"
+    );
+    assert!(
+        code.contains("const RATE_LIMITED"),
+        "a rate limit needs its own message"
+    );
+    // And the two messages must genuinely differ: one constant used for both
+    // would satisfy every other assertion here.
+    let rate_limited = code
+        .split("const RATE_LIMITED")
+        .nth(1)
+        .expect("RATE_LIMITED is defined")
+        .split(';')
+        .next()
+        .expect("the message is one statement");
+    let failed = code
+        .split("const FAILED")
+        .nth(1)
+        .expect("FAILED is defined")
+        .split(';')
+        .next()
+        .expect("the message is one statement");
+    assert_ne!(
+        rate_limited.trim(),
+        failed.trim(),
+        "a throttled board and an offline board must not say the same thing"
+    );
+}
+
+/// A stop whose detail was asked for is not asked for again.
+///
+/// The regression: `describe_new_stops` selected on `detail.is_none()`, which is
+/// also true of a stop whose detail was *refused*, so every subsequent search
+/// re-issued the whole same-named set. Measured: four keystrokes, 111 requests.
+#[test]
+fn a_stop_detail_is_requested_at_most_once() {
+    let code = browser_code();
+    let describe = code
+        .split("async fn describe_new_stops")
+        .nth(1)
+        .expect("describe_new_stops is in the browser layer")
+        .split("\nasync fn ")
+        .next()
+        .expect("the body of describe_new_stops");
+    assert!(
+        !describe.contains("detail.is_none()"),
+        "selecting on `detail.is_none()` re-asks for every stop whose detail \
+         was refused, which is what produced 111 requests for four keystrokes. \
+         The selection belongs to `stops_needing_detail`, which tracks 'asked' \
+         separately from 'arrived'.\n--- describe_new_stops ---\n{describe}"
+    );
+    assert!(
+        describe.contains("stops_needing_detail"),
+        "the browser layer must use the tested selection rule rather than \
+         re-implementing it, or the two drift apart"
+    );
+}

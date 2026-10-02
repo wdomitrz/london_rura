@@ -118,6 +118,22 @@ pub struct Station {
     /// `None` while the detail has not been fetched, and for every non-bus
     /// station — nothing else on this board has two stops with one name.
     pub detail: Option<StopDetail>,
+    /// Whether this stop's detail has been asked for, **whether or not it
+    /// arrived**.
+    ///
+    /// **This exists because `detail.is_none()` cannot tell those apart.** Every
+    /// stop that has no detail is re-requested on the next search — so a stop
+    /// whose detail failed (a 429, a dropped connection) was re-requested on
+    /// *every keystroke after it*, indefinitely, each one joining the burst that
+    /// caused the failure. Measured: four keystrokes of "Camden" produced 111
+    /// detail requests against a set of stops that had already failed once.
+    ///
+    /// So "not fetched yet" and "fetched and did not come" are now two states,
+    /// and only the first is retried. The cost is one `bool` per station; the
+    /// alternative is a stop detail that is re-asked for as long as the reader
+    /// keeps typing, which is how a single search field took down the whole
+    /// board.
+    pub detail_asked: bool,
     /// The modes this station is served by.
     pub modes: ModeSet,
 }
@@ -689,6 +705,7 @@ pub fn station_index(per_mode: Vec<(Mode, Vec<StopPoint>)>) -> Vec<Station> {
                         names: vec![name],
                         locality: point.locality.clone(),
                         detail: None,
+                        detail_asked: false,
                         modes,
                     });
                     index.insert(key, merged.len() - 1);
@@ -2671,5 +2688,133 @@ mod shape {
                 "if this ever parses, the endpoint changed and the type must be revisited"
             );
         }
+    }
+}
+
+/// Which stops still need a detail request, and which have already had one.
+///
+/// **The selection rule, extracted so it can be tested without a browser.**
+/// `describe_new_stops` in the browser layer used to inline this, and inlining
+/// it is how it came to ask for the same stop on every keystroke: the filter was
+/// `detail.is_none()`, which is equally true of a stop whose detail was asked
+/// for and *refused*, so every later search re-issued the whole set of
+/// same-named stops that had already failed. Measured on 2026-10-02, four
+/// keystrokes of "Camden" produced 111 detail requests against a set that had
+/// already failed once.
+pub fn stops_needing_detail(stations: &mut [Station]) -> Vec<String> {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for station in stations.iter() {
+        *counts.entry(station.name.as_str()).or_default() += 1;
+    }
+    // Owned, not borrowed: `counts` holds references into the stations' own
+    // `String`s and the loop below mutates them.
+    let ambiguous: std::collections::HashSet<&str> = counts
+        .iter()
+        .filter(|(_, count)| **count > 1)
+        .map(|(name, _)| *name)
+        .collect();
+    let ambiguous: std::collections::HashSet<String> =
+        ambiguous.into_iter().map(str::to_string).collect();
+
+    let mut wanted = Vec::new();
+    for station in stations.iter_mut() {
+        if !ambiguous.contains(&station.name) || station.detail_asked {
+            continue;
+        }
+        if let Some((_, id)) = station.ids.first() {
+            wanted.push(id.clone());
+        }
+        // Marked before the request goes out, not after it comes back, so two
+        // overlapping searches cannot both send the same one.
+        station.detail_asked = true;
+    }
+    wanted
+}
+
+#[cfg(test)]
+mod detail_retry {
+    use super::*;
+
+    fn stop(id: &str, name: &str) -> Station {
+        Station {
+            ids: vec![(Mode::Bus, id.to_string())],
+            name: name.to_string(),
+            names: vec![name.to_string()],
+            locality: None,
+            detail: None,
+            detail_asked: false,
+            modes: ModeSet::empty(),
+        }
+    }
+
+    /// Only same-named stops need a detail, and only until one has been asked for.
+    ///
+    /// The four stops named for one street are the case the detail exists for:
+    /// they are indistinguishable without it, and asking is the only way to tell
+    /// them apart.
+    #[test]
+    fn same_named_stops_are_asked_about_once_each() {
+        let mut stations = vec![
+            stop("490000173RC", "Oxford Circus Station"),
+            stop("490000173RG", "Oxford Circus Station"),
+            stop("940GZZLUOXC", "Oxford Circus"),
+        ];
+        let first = stops_needing_detail(&mut stations);
+        assert_eq!(first.len(), 2, "the two same-named bus stops, not the tube");
+        assert!(first.contains(&"490000173RC".to_string()));
+        assert!(!first.contains(&"940GZZLUOXC".to_string()));
+
+        // A second search must not re-ask. This is the regression: the old
+        // filter was `detail.is_none()`, which is still true when a detail was
+        // asked for and *refused*, so the set was re-requested every time.
+        let second = stops_needing_detail(&mut stations);
+        assert!(
+            second.is_empty(),
+            "a stop already asked about must not be asked again, whether or not \
+             the detail arrived: {second:?}"
+        );
+    }
+
+    /// A detail that never arrived must not be re-requested forever.
+    ///
+    /// The failure that is left to prove this is not merely cosmetic: a 429
+    /// leaves `detail` as `None` *and* `detail_asked` as `true`, and it is the
+    /// second flag that stops the retry storm.
+    #[test]
+    fn a_refused_detail_is_not_retried() {
+        let mut stations = vec![
+            stop("490000173RC", "Oxford Circus Station"),
+            stop("490000173RG", "Oxford Circus Station"),
+        ];
+        // Ask once. Nothing comes back — the request is refused, as a rate limit
+        // refuses it — so `detail` stays `None` on both.
+        assert_eq!(stops_needing_detail(&mut stations).len(), 2);
+        assert!(stations.iter().all(|s| s.detail.is_none()));
+        // The next search must still not re-ask, which is the whole point.
+        assert!(stops_needing_detail(&mut stations).is_empty());
+    }
+
+    /// A stop that gains a same-named neighbour later must still get its detail.
+    ///
+    /// The converse of the rule above: "asked about" may only ever suppress a
+    /// *repeat* of the same question. Marking every station on every pass would
+    /// retire a stop's detail permanently and leave two same-named stops
+    /// indistinguishable — trading one bug for another.
+    #[test]
+    fn a_stop_is_only_retired_for_the_name_it_shared() {
+        let mut stations = vec![stop("490000173RC", "Russell Street")];
+        // Unique today, so nothing is asked and nothing is marked.
+        assert!(stops_needing_detail(&mut stations).is_empty());
+        assert!(!stations[0].detail_asked);
+
+        // A neighbour with the same name arrives, which is what makes the
+        // detail worth fetching.
+        stations.push(stop("490000173RG", "Russell Street"));
+        let wanted = stops_needing_detail(&mut stations);
+        assert_eq!(
+            wanted.len(),
+            2,
+            "both stops now need a detail, including the one seen earlier"
+        );
     }
 }

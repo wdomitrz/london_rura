@@ -72,6 +72,20 @@ const EMPTY: &str = "No upcoming departures found.";
 /// difference, and the original's was the same.
 const FAILED: &str = "Error fetching departures. Please try again later.";
 
+/// Shown when TfL refused the request because this app asked for too much.
+///
+/// **A separate message, and it is the one a reader can act on.** The generic
+/// `FAILED` covers a dead network and a broken endpoint, neither of which the
+/// reader can do anything about; being throttled is the one failure this app
+/// causes itself, and it clears on its own within seconds. So it says what is
+/// happening and what to do about it, instead of sending the reader away to
+/// retry into the same limit.
+///
+/// Measured on 2026-10-02: typing one eight-letter word into the search box
+/// produced 201 requests, and every one of them ended on `FAILED`.
+const RATE_LIMITED: &str =
+    "TfL is rate-limiting this app. Wait a few seconds and try again.";
+
 /// Shown when a search matches nothing, on the board's own terms.
 ///
 /// It is not an error: TfL's search covers every stop point in London and a
@@ -300,12 +314,12 @@ impl App {
                 // There is nothing cached to show instead, so this message is the
                 // whole of the offline behaviour: readable, brief, and the same
                 // whether the network is down or TfL is unwell.
-                web_sys::console::error_1(&JsValue::from_str(&error));
+                web_sys::console::error_1(&JsValue::from_str(&error.to_string()));
                 // A refresh that fails must not throw away the board the reader
                 // is already looking at: a departure list thirty seconds stale
                 // is worth more than a page saying it could not refresh.
                 if self.raw_board.borrow().is_none() {
-                    say(&self.departures, FAILED);
+                    say(&self.departures, error.message());
                 }
                 return;
             }
@@ -347,7 +361,7 @@ impl App {
 type Shared = Rc<App>;
 
 /// What one mode's fetch produced: its raw bytes, or why it has none.
-type LineResult = Result<Vec<u8>, String>;
+type LineResult = Result<Vec<u8>, FetchError>;
 
 /// One station-list fetch, boxed and pinned so the futures can be polled by
 /// hand.
@@ -885,7 +899,58 @@ fn destination_of(arrival: &TflArrival) -> String {
         .to_string()
 }
 
-/// Fetch a URL as raw bytes, or an error a reader can be told about.
+/// Throttle: pause this long between requests to TfL, in milliseconds.
+///
+/// **The measured reason this exists.** TfL's free API rate-limits by IP and
+/// answers a burst with HTTP 429 and `"Rate limit is exceeded"` — measured on
+/// 2026-10-02: 25 concurrent requests to distinct URLs came back 200 three
+/// times running and 429 the fourth, and 40 concurrent came back 429 every
+/// time. Before this, one reader typing a single eight-letter word into the
+/// search box produced **201** requests, and every one of them drew the same
+/// wall of error a genuine outage draws.
+///
+/// So the app now spends its own traffic slowly enough to stay inside the
+/// limit. This is a floor on the *spacing* of requests, not a cap on how many
+/// it may make: a board that has answers to give is worth a second of latency,
+/// and a board that starves itself to stay quiet is worse than a slow one.
+const TFL_REQUEST_GAP_MS: i32 = 120;
+
+/// Why a request to TfL failed, in the two ways a reader is told apart.
+///
+/// A rate limit and a dead network are different problems with different
+/// remedies, and they used to produce the same seven words on screen. A reader
+/// whose phone dropped needs to know the board is not coming back until they
+/// reconnect; a reader being throttled needs to know to stop hammering the
+/// search box for a few seconds. Collapsing both into "try again later" is what
+/// made the real cause hard to see.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FetchError {
+    /// TfL answered 429: this app asked for too much, too quickly.
+    RateLimited,
+    /// No connection, a 500, a 404, or a body that could not be read.
+    Other,
+}
+
+impl FetchError {
+    /// The word a reader is shown, which is the whole difference between them.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::RateLimited => RATE_LIMITED,
+            Self::Other => FAILED,
+        }
+    }
+}
+
+impl std::fmt::Display for FetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RateLimited => f.write_str("TfL rate-limited this app"),
+            Self::Other => f.write_str("TfL could not be reached"),
+        }
+    }
+}
+
+/// Fetch a URL as raw bytes, or the reason a reader can be told about.
 ///
 /// The bytes, not `response.json()`. `json()` resolves to a live JavaScript
 /// object — the whole body, materialised as JS values before any Rust runs —
@@ -900,27 +965,67 @@ fn destination_of(arrival: &TflArrival) -> String {
 /// reasons — no connection, a 500, a rate limit, a body that is not JSON — and
 /// every one of them ends here, because this app has nothing cached to fall
 /// back on and nothing to retry with.
-async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let window = web_sys::window().ok_or("no window")?;
+async fn fetch_bytes(url: &str) -> Result<Vec<u8>, FetchError> {
+    let window = web_sys::window().ok_or(FetchError::Other)?;
+    throttle().await;
     let response = JsFuture::from(window.fetch_with_str(url))
         .await
-        .map_err(|error| format!("{error:?}"))?;
+        .map_err(|_| FetchError::Other)?;
     let response: Response = response
         .dyn_into()
-        .map_err(|_| "the response is not a Response".to_string())?;
+        .map_err(|_| FetchError::Other)?;
     if !response.ok() {
-        return Err(format!("TfL answered {}", response.status()));
+        // 429 is the one non-OK status that is this app's own doing rather
+        // than TfL's, and it is worth distinguishing for exactly that reason.
+        return Err(if response.status() == 429 {
+            FetchError::RateLimited
+        } else {
+            FetchError::Other
+        });
     }
     let buffer = JsFuture::from(
         response
             .array_buffer()
-            .map_err(|error| format!("{error:?}"))?,
+            .map_err(|_| FetchError::Other)?,
     )
     .await
-    .map_err(|error| format!("{error:?}"))?;
+    .map_err(|_| FetchError::Other)?;
     // `to_vec` on the typed-array view is a single copy of the bytes out of
     // wasm memory, not a per-element crossing of the boundary.
     Ok(js_sys::Uint8Array::new(&buffer).to_vec())
+}
+
+/// Wait long enough that this request is not part of a burst.
+///
+/// One timer for the whole app, because the limit is on the app's traffic and
+/// not on any one call: five callers each keeping their own tally would still
+/// add up to a burst between them. A zero-delay timer for the very first
+/// request, so opening the board is not itself delayed.
+async fn throttle() {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let now = window.performance().map_or(0.0, |p| p.now());
+    let last = LAST_REQUEST.with(|cell| cell.replace(now));
+    let wait = (TFL_REQUEST_GAP_MS as f64) - (now - last);
+    if wait <= 0.0 {
+        return;
+    }
+    let promise = js_sys::Promise::new(&mut |resolve: js_sys::Function, _| {
+        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+            resolve.as_ref(),
+            wait as i32,
+        );
+    });
+    let _ = JsFuture::from(promise).await;
+}
+
+thread_local! {
+    /// When this app last asked TfL for anything, as `Performance::now`.
+    ///
+    /// Deliberately process-wide rather than per-app: the budget that matters is
+    /// the IP's, and everything this page sends shares it.
+    static LAST_REQUEST: std::cell::Cell<f64> = const { std::cell::Cell::new(f64::NEG_INFINITY) };
 }
 
 /// The picker changed: take the new station, remember it, and show it.
@@ -1214,6 +1319,7 @@ fn spawn_search(app: &Shared, query: String, modes: ModeSet) {
                         names: vec![stop.name],
                         locality: stop.locality,
                         detail: None,
+                        detail_asked: false,
                         modes: stop.modes,
                     });
                 }
@@ -1252,21 +1358,19 @@ fn spawn_search(app: &Shared, query: String, modes: ModeSet) {
 /// The requests are issued together rather than one after another, for the same
 /// reason the station list is: a search that takes four round trips to render
 /// reads as a slow app, and there is no reason for them to queue.
+///
+/// **Only for stops that have never been asked about, whatever the outcome.**
+/// Before this, the test was `detail.is_none()`, which is also true of a stop
+/// whose detail was *asked for and refused* — so every search re-issued the
+/// whole set of same-named stops, including the ones already known to be
+/// failing. The fix is `detail_asked`: asked-and-failed is now its own state,
+/// and it is not asked again. Re-asking would be defensible if a refusal were
+/// proof of nothing, but a refusal here is almost always this app's own rate
+/// limit, and re-asking into a rate limit is what makes it permanent.
 async fn describe_new_stops(app: &Shared) {
     let wanted: Vec<String> = {
-        let stations = app.stations.borrow();
-        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        for station in stations.iter() {
-            *counts.entry(station.name.as_str()).or_default() += 1;
-        }
-        stations
-            .iter()
-            .filter(|station| {
-                counts.get(station.name.as_str()).copied().unwrap_or(0) > 1
-                    && station.detail.is_none()
-            })
-            .filter_map(|station| station.ids.first().map(|(_, id)| id.clone()))
-            .collect()
+        let mut stations = app.stations.borrow_mut();
+        crate::departures::stops_needing_detail(&mut stations)
     };
     if wanted.is_empty() {
         return;
