@@ -419,7 +419,6 @@ fn strip_non_rendered(page: &str) -> String {
         };
         out.push_str(&rest[..at]);
         rest = &rest[at..];
-        // Comments and style blocks go entirely.
         if let Some(after) = rest.strip_prefix("<!--") {
             rest = after.split_once("-->").map_or("", |(_, r)| r);
             continue;
@@ -453,7 +452,6 @@ fn strip_non_rendered(page: &str) -> String {
                 continue;
             }
         }
-        // A tag: keep the quoted literals out of a <script>, drop the tag.
         let Some(close) = rest.find('>') else {
             out.push_str(rest);
             break;
@@ -606,7 +604,6 @@ fn the_workflow_can_actually_run_its_checks() {
             .any(|line| line.trim() == format!("- name: {step}"));
         assert!(named, "the workflow lost or renamed its step: {step}");
     }
-    // Both targets are linted, and the site check names all eight files.
     assert!(workflow.contains("--all-targets -- -D warnings"));
     assert!(workflow.contains("--lib --target wasm32-unknown-unknown -- -D warnings"));
     for file in [
