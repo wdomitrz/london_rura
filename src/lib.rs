@@ -16,10 +16,9 @@
 //!   sort, how arrivals group into platforms, the minutes, the line colours.
 //!   It is pure, has no `web-sys` in it, and is what the unit tests drive.
 //! * `ui` is the browser — the `fetch` to TfL, the DOM, the timer, the
-//!   query parameter, the service-worker registration. It exists only on wasm,
-//!   so it is written as plain text rather than a doc link: the module is absent
-//!   from a host build, and a link to a module that is not there is a broken
-//!   link in the documentation the gate builds.
+//!   query parameter, the service-worker registration. Named as plain text, not
+//!   a doc link: the module exists only on wasm, and the rustdoc the gate builds
+//!   runs on the host.
 //!
 //! So the original `app.js` is now `departures.rs` for its decisions and
 //! `ui.rs` for its side effects, and neither can quietly change the other's
