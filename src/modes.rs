@@ -19,7 +19,7 @@
 /// One mode of transport, as TfL names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Mode {
-    /// The Underground, including its Overground-equivalent sub-surface lines.
+    /// The Underground, including the sub-surface lines.
     Tube,
     /// The Elizabeth line, which TfL treats as a separate mode and the app
     /// previously hid.
@@ -57,9 +57,9 @@ pub enum Mode {
 
 /// Every mode, in the order the toggle shows them.
 ///
-/// Underground first, because it is what most people mean by this app, and
-/// because it is the mode with the most stations. Bus is last of the big three
-/// because a bus stop is not a place you board a whole network from.
+/// Underground first: it is what most people mean by this app, and the mode
+/// with the most stations. Bus comes after the railway modes because a bus stop
+/// is not a place you board a whole network from.
 pub const MODES: &[Mode] = &[
     Mode::Tube,
     Mode::Elizabeth,
