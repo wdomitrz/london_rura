@@ -152,7 +152,13 @@ fn manifest_json() -> String {
         })
         .collect();
     let manifest = serde_json::json!({
-        "id": "./",
+        // No `id` member. Chrome resolves a relative id against start_url's
+        // *origin*, not the manifest's directory, so the `"./"` this function
+        // once emitted gave every app in the family the same install identity
+        // -- and Android treats a manifest whose id matches an installed app
+        // as an update of that app, swallowing the second install. Left out,
+        // identity falls back to `start_url`, which resolves against the
+        // manifest URL and is unique per app.
         "name": NAME,
         "short_name": NAME,
         "start_url": "./",
