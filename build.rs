@@ -27,12 +27,6 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-/// The files this script owns and the committed source each comes from.
-///
-/// Deliberately not listed: `app.js` and `app_bg.wasm`. Those are written into
-/// `dist/` by the `wasm-bindgen` step. They are build output with no committed
-/// source to copy from, and this script must not delete them, because they are
-/// the board itself.
 /// The app's name, as its original `manifest.json` had it.
 const NAME: &str = "London Rura";
 
@@ -66,20 +60,24 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/icon.svg");
     println!("cargo:rerun-if-changed=build.rs");
 
+    // The files this script owns, each paired with the committed source it comes
+    // from. Deliberately not listed: `app.js` and `app_bg.wasm`. Those are
+    // written into `dist/` by the `wasm-bindgen` step, and this script must not
+    // delete them — they are the board itself.
     let mut built: Vec<(String, Vec<u8>)> = Vec::new();
     built.push((
         "index.html".to_string(),
         read(&root, "src/ui.html").expect("the static shell"),
     ));
-    // The committed SVG is published as well as rasterized: the shell links it
-    // directly as the page icon, and it is the source of the two PNGs above,
-    // so a site that ships the PNGs without it has lost its own icon's origin.
+    // The committed SVG ships as well as rasterizes: the shell links it
+    // directly as the page icon, so a site that published only the PNGs would
+    // have lost its own icon's origin.
     built.push((
         "icon.svg".to_string(),
         read(&root, "assets/icon.svg").expect("the icon SVG"),
     ));
-    // Both PNGs come from the one committed SVG. They are build output, they
-    // live only in `dist/`, and they are never committed.
+    // Both PNGs come from the one committed SVG. They are build output: they
+    // live only in `dist/` and are never committed.
     let icon = read(&root, "assets/icon.svg").expect("the icon SVG");
     for size in ICON_SIZES {
         built.push((format!("icon-{size}.png"), rasterize(&icon, *size)));
@@ -154,7 +152,13 @@ fn manifest_json() -> String {
         })
         .collect();
     let manifest = serde_json::json!({
-        "id": "./",
+        // No `id` member. Chrome resolves a relative id against start_url's
+        // *origin*, not the manifest's directory, so the `"./"` this function
+        // once emitted gave every app in the family the same install identity
+        // -- and Android treats a manifest whose id matches an installed app
+        // as an update of that app, swallowing the second install. Left out,
+        // identity falls back to `start_url`, which resolves against the
+        // manifest URL and is unique per app.
         "name": NAME,
         "short_name": NAME,
         "start_url": "./",

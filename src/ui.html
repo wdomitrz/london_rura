@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- The author's own icon, committed as SVG and linked directly. The PNGs the
-     manifest and iOS use are rasterized from this same file at build time. -->
+<!-- The committed SVG is the icon the browser actually loads; the PNGs the
+     manifest and iOS use are rasterized from it at build time. -->
 <link rel="icon" href="./icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="./icon-192.png">
 <link rel="manifest" href="./manifest.webmanifest">
@@ -85,7 +85,6 @@ body {
 }
 main { max-width: 52rem; margin: 0 auto; padding: 8px 10px 40px; }
 
-/* --- the header: title, station name, and the freshness stamp, on one line --- */
 header {
   display: flex;
   align-items: baseline;
@@ -109,10 +108,9 @@ h1 {
 .stamp { margin-left: auto; font-size: 11px; color: var(--faint); }
 #notice { margin: 4px 0 0; font-size: 11px; color: var(--dim); min-height: 15px; }
 
-/* --- the mode toggles: one row, always visible, the app's main switch --- */
-/* Nine toggles, and the point is that they must stay on the screen rather than
-   become a menu: a mode a reader cannot see is a mode they will not think to
-   turn on. They wrap onto a second row on a phone rather than scrolling off. */
+/* The toggles stay on the screen rather than becoming a menu: a mode a reader
+   cannot see is a mode they will not think to turn on. They wrap onto a second
+   row on a phone rather than scrolling off. */
 #toggles { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0 6px; }
 .toggle {
   --chip: #444; --chip-ink: #fff;
@@ -151,7 +149,6 @@ h1 {
 .toggle.on:hover { filter: brightness(1.12); }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 
-/* --- search: a single line, and a result list that reads as a menu --- */
 #search {
   width: 100%;
   min-height: 34px;
@@ -215,7 +212,6 @@ body:not(.chosen) #results:empty { display: none; }
 }
 #results p { margin: 4px 2px; font-size: 11.5px; color: var(--faint); }
 
-/* --- chips: the line or mode name on its own colour --- */
 .chip {
   --chip: #666; --chip-ink: #fff;
   display: inline-flex;
@@ -240,7 +236,6 @@ body:not(.chosen) #results:empty { display: none; }
    that is longer than any column from spilling across the row. */
 td:first-child .chip { max-width: 100%; }
 
-/* --- the board itself --- */
 #departures { margin-top: 10px; }
 #departures h2 {
   margin: 0 0 2px;
@@ -372,8 +367,8 @@ td.no-platform { color: var(--faint); }
 </main>
 
 <noscript>This board needs JavaScript to run. Departures come live from the TfL API and are shown here; without JavaScript there is nothing to show.</noscript>
-<!-- The only JavaScript in this app: a dynamic import of the generated
-     bindings, and a message if that fails. Everything else is Rust. -->
+<!-- The only script in this app: a dynamic import of the generated bindings,
+     and the message shown if that fails. -->
 <script type="module">
 import('./app.js').then(m => m.default()).catch(error => { document.getElementById('notice').textContent = 'London Rura could not start.'; const box = document.getElementById('departures'); box.textContent = 'London Rura could not start. Reload the page or check your connection. ' + error; });
 </script></body>

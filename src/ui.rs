@@ -707,11 +707,10 @@ async fn load_stations(app: &Shared) {
 
 /// Await every future concurrently, and return the results in order.
 ///
-/// This is `futures::join_all`, written out because the crate does not depend
-/// on `futures` and one combinator does not justify it. The part that matters is
-/// that it does **not** await the futures in sequence: it polls every one of
-/// them on each turn of the loop and only yields when none of them is ready, so
-/// all of them make progress at once.
+/// `futures::join_all`, written out because the crate does not depend on
+/// `futures` and one combinator does not justify it. The part that matters is
+/// that it does **not** await in sequence: it polls every future on each turn
+/// and only yields when none is ready, so all of them progress at once.
 ///
 /// A naive `for future in futures { out.push(future.await) }` here would compile,
 /// pass every test, and serialise twelve requests into twelve round trips — the
@@ -765,12 +764,12 @@ async fn join_all<F>(mut futures: Vec<Pin<Box<dyn Future<Output = F>>>>) -> Vec<
     slots.into_iter().flatten().collect()
 }
 
-/// Hand control back to the browser's event loop.
+/// Hand control back to the browser's event loop, as a real macrotask.
 ///
-/// A zero-delay `setTimeout`, not a resolved microtask. A microtask is drained
+/// A zero-delay `setTimeout`, not a resolved microtask: a microtask is drained
 /// before the browser returns to its event loop, so awaiting one from Rust does
-/// not let a pending `fetch` make progress; polling the twelve futures that way
-/// starves them and never terminates. A timer genuinely yields.
+/// not let a pending `fetch` make progress, and polling the twelve futures that
+/// way starves them and never terminates. A timer genuinely yields.
 async fn yield_to_browser() {
     let promise = js_sys::Promise::new(
         &mut |resolve: js_sys::Function, _reject: js_sys::Function| {
@@ -1685,10 +1684,9 @@ fn paint(app: &Shared, board: &Board) {
 
     // Platforms are already sorted by platform number then mode, so the modes
     // arrive in contiguous runs and one pass groups them.
-    // Split the platform list into runs of consecutive platforms sharing a
-    // mode. Every platform is kept — a run is a *heading*, not a container, so
-    // one Underground platform and the next Underground platform are two runs
-    // of one platform each and both are drawn.
+    // Every platform is kept: a run of same-mode platforms is a *heading*, not
+    // a container, so one Underground platform and the next Underground platform
+    // are two runs of one platform each and both are drawn.
     //
     // **This is what the board got wrong.** Collapsing a run to its first
     // platform drew one table per mode, so King's Cross — which has eight
@@ -1989,9 +1987,8 @@ fn script_belongs_to_app(script: &str, ours: &str) -> bool {
     }
 }
 
-/// Report something recoverable. Never a panic, never silent — but never a
-/// status line either, because nothing `ui.rs` writes to `#notice` is about the
-/// app's own plumbing.
+/// Report something recoverable: never a panic, never silent, and never a
+/// `#notice` line — nothing this app writes there is about its own plumbing.
 /// Log a message that is not an error value: a failed request's reason is text
 /// the app assembled, not a `JsValue` the browser threw.
 fn warn_text(message: &str) {

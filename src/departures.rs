@@ -134,7 +134,8 @@ pub struct Station {
     /// keeps typing, which is how a single search field took down the whole
     /// board.
     pub detail_asked: bool,
-    /// The modes this station is served by.
+    /// The modes this station is served by: the union of every mode that
+    /// mentioned it, not just the mode whose response created the row.
     pub modes: ModeSet,
 }
 
@@ -184,12 +185,10 @@ impl StopDetail {
 }
 
 impl Station {
-    /// The id to request arrivals for, given which modes are on.
-    ///
-    /// The enabled mode earliest in [`crate::modes::MODES`], so a reader who has
-    /// everything on sees the Underground's board for an interchange and a
-    /// reader who has only buses on sees the buses. `None` when no enabled mode
-    /// serves this station, which is how the picker filters it out.
+    /// The enabled mode earliest in [`crate::modes::MODES`], so a reader with
+    /// everything on sees the Underground's board for an interchange and a reader
+    /// with only buses on sees the buses. `None` when no enabled mode serves
+    /// this station, which is how the picker filters it out.
     pub fn id_for(&self, enabled: ModeSet) -> Option<&str> {
         self.ids
             .iter()
@@ -329,7 +328,6 @@ impl Board {
 /// timetable: ten is enough to see what is coming and few enough to read.
 pub const DEPARTURES_PER_PLATFORM: usize = 10;
 
-/// The platform name used for an arrival that does not carry one.
 pub const UNKNOWN_PLATFORM: &str = "Unknown Platform";
 
 /// The colour a line with no entry in [`line_colour`] is drawn in.
@@ -367,15 +365,6 @@ const LINE_COLOURS: &[(&str, &str)] = &[
 ///
 /// The original app wrote `lineColors[dep.lineName] || "#666"`. That is not
 /// the same thing: a key that exists but is empty — a `lineName` of `""`,
-/// which TfL does send for the terminating services on some interchanges —
-/// is falsy in JavaScript, so it fell through to the grey as well. The Rust
-/// treats the empty name as a line it has no colour for, which is what the
-/// original meant, and everything else the table knows keeps its own colour.
-/// The published colour of a line, or the grey default for a line this table
-/// has never heard of.
-///
-/// The original app wrote `lineColors[dep.lineName] || "#666"`. That is not the
-/// same thing: a key that exists but is empty — a `lineName` of `""`,
 /// which TfL does send for the terminating services on some interchanges —
 /// is falsy in JavaScript, so it fell through to the grey as well. The Rust
 /// treats the empty name as a line it has no colour for, which is what the
@@ -568,15 +557,6 @@ pub fn modes_of(names: &[String]) -> ModeSet {
     set
 }
 
-/// The stations to offer, in the order to offer them.
-///
-/// TfL's own order is the order it stores them in, which is neither the
-/// alphabet nor anything a reader would choose. Sorting by `commonName` is what
-/// the original did. The comparison is not `localeCompare`, which the browser
-/// implements with the reader's locale and which the unit tests could not
-/// pin down: it is a case-insensitive comparison with ties broken on the exact
-/// code points, so "Acton Town" and "Acton Warren" keep a stable order and the
-/// result does not depend on the machine the tests run on.
 /// A stop point exactly as TfL sends it, from one mode's response.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
 pub struct StopPoint {
@@ -1230,7 +1210,6 @@ mod tests {
     use super::*;
 
     /// A stop point, as the list would supply one.
-    /// A stop point, as a mode's response would supply one.
     fn stop(id: &str, name: Option<&str>) -> StopPoint {
         StopPoint {
             id: id.to_string(),
@@ -1279,8 +1258,6 @@ mod tests {
     fn minutes_of(platform: &Platform) -> Vec<i32> {
         platform.departures.iter().map(|d| d.minutes).collect()
     }
-
-    // ------------------------------------------------------- stations and modes
 
     /// Every mode's api name must be a mode the app knows.
     ///
@@ -1491,8 +1468,6 @@ mod tests {
         assert_eq!(index[0].modes.active(), vec![Mode::Tube, Mode::River]);
     }
 
-    // -------------------------------------------------------------- station sort
-
     /// The picker is alphabetical by name.
     #[test]
     fn stations_sort_alphabetically_by_common_name() {
@@ -1540,8 +1515,6 @@ mod tests {
         assert_eq!(names, vec!["Acton Town", "acton warren"]);
     }
 
-    // ------------------------------------------------------------- arrivals sort
-
     /// Arrivals come off the wire in whatever order TfL computes them, which is
     /// not the order they are due. The board sorts on `timeToStation` ascending,
     /// and that sort happens before the grouping, so a platform's own table is in
@@ -1559,8 +1532,6 @@ mod tests {
         // Platform 2 has two, and they are in due order: 300 before 600.
         assert_eq!(minutes_of(&made.platforms[1]), vec![5, 10]);
     }
-
-    // --------------------------------------------------------- platform grouping
 
     /// Every platform becomes its own table, and the tables are ordered by the
     /// number in the platform name — so "Platform 10" comes after "Platform 9".
@@ -1613,8 +1584,6 @@ mod tests {
         assert!(board.platforms.is_empty());
     }
 
-    // ------------------------------------------------------------ arrival minutes
-
     /// The minutes are `floor(timeToStation / 60)`, which is not rounding: a train
     /// ninety seconds out reads one minute, because the board must not overstate
     /// how long the reader has.
@@ -1652,8 +1621,6 @@ mod tests {
         assert_eq!(minutes_until(&missing), 0);
         assert_eq!(minutes_until(&missing), 0, "a missing time is not a minute");
     }
-
-    // --------------------------------------------------------------- truncation
 
     /// Each platform shows at most ten trains. This is a board, not a timetable.
     #[test]
@@ -1701,8 +1668,6 @@ mod tests {
         assert_eq!(minutes_of(quiet), vec![5]);
     }
 
-    // -------------------------------------------------------------- line colours
-
     /// Every line in the table has its published colour, and the two lines whose
     /// colours are dark — Northern, which is black, and the greys — are still
     /// listed rather than defaulted.
@@ -1744,8 +1709,6 @@ mod tests {
         assert_eq!(line_colour("Northern City"), DEFAULT_LINE_COLOUR);
         assert_eq!(line_colour("central"), DEFAULT_LINE_COLOUR);
     }
-
-    // ----------------------------------------------------------------- fixtures
 
     /// A whole board, assembled the way TfL's response assembles it, so the shape
     /// the UI renders is the one the domain produces.
@@ -2066,8 +2029,6 @@ mod tests {
         );
     }
 
-    // -------------------------------------------------------------- the search
-
     /// A small station list to search. The ranking tests all want the same one, and
     /// a shared fixture keeps them comparable.
     fn searchable() -> Vec<Station> {
@@ -2237,8 +2198,6 @@ mod tests {
         assert!(two >= 1, "'br' must still match Brixton");
     }
 
-    // ------------------------------------------------- mode on the timetable
-
     /// A mode switch hides that mode's platforms and keeps the others.
     ///
     /// This is the toggle's effect on the board, which it did not have: a platform
@@ -2369,8 +2328,6 @@ mod tests {
         assert_eq!(departure_colour("mystery", None), DEFAULT_LINE_COLOUR);
     }
 
-    // ------------------------------------------- interchanges are one station
-
     /// One interchange is one row, whatever the modes call it.
     ///
     /// TfL names each half after its mode, so searching "bank" used to return the
@@ -2457,8 +2414,6 @@ mod tests {
         )]);
         assert_eq!(index.len(), 2, "two places, two rows: {index:?}");
     }
-
-    // ------------------------------------------- telling same-named stops apart
 
     /// The three stops at Oxford Circus describe themselves differently.
     ///
@@ -2547,8 +2502,6 @@ mod tests {
     }
 }
 
-// ------------------------------------------------- the mode response's shape
-
 /// The wrapper `StopPoint/Mode/{mode}` puts its list in.
 ///
 /// **The endpoint does not return a bare array.** It returns
@@ -2615,8 +2568,6 @@ mod shape {
         let list: StopPointList = serde_json::from_str(r#"{}"#).expect("a missing key parses");
         assert!(list.stop_points.is_empty());
     }
-
-    // ---------------------------------------------------- the search response
 
     #[cfg(test)]
     mod search_shape {
