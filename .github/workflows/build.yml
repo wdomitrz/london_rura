@@ -245,8 +245,9 @@ jobs:
           python3 - <<'PY'
           import json
           m = json.load(open("dist/manifest.webmanifest"))
-          for key in ("id", "start_url", "scope"):
+          for key in ("start_url", "scope"):
               assert m[key] == "./", f"{key} must be relative, got {m[key]!r}"
+          assert "id" not in m, "an id of \"./\" resolves to the bare origin and collides with every sibling app"
           assert m["name"] == "London Rura", "the name must be preserved"
           assert m["short_name"] == "London Rura", "the short name must be preserved"
           assert m["theme_color"] == "#000000", "the theme colour must be the original one"
