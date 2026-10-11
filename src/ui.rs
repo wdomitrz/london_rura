@@ -434,7 +434,7 @@ pub fn start() -> Result<(), JsValue> {
     // suggestion causes, and it made every click pick the top row.
     listen(&app, "search", "keydown", on_keydown)?;
     watch_connection(&app)?;
-    register_service_worker(&window)?;
+    register_service_worker(&window);
 
     say(&app.departures, NO_STATION);
     spawn_local(async move {
@@ -809,7 +809,10 @@ fn encode_uri_component(text: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(byte as char);
             }
-            _ => out.push_str(&format!("%{byte:02X}")),
+            _ => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "%{byte:02X}");
+            }
         }
     }
     out
@@ -999,13 +1002,17 @@ async fn throttle() {
     };
     let now = window.performance().map_or(0.0, |p| p.now());
     let last = LAST_REQUEST.with(|cell| cell.replace(now));
-    let wait = (TFL_REQUEST_GAP_MS as f64) - (now - last);
+    let wait = f64::from(TFL_REQUEST_GAP_MS) - (now - last);
     if wait <= 0.0 {
         return;
     }
     let promise = js_sys::Promise::new(&mut |resolve: js_sys::Function, _| {
-        let _ = window
-            .set_timeout_with_callback_and_timeout_and_arguments_0(resolve.as_ref(), wait as i32);
+        // The throttle gap is bounded by TFL_REQUEST_GAP_MS, far inside an
+        // i32; the wait is at most that.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let timeout = wait as i32;
+        let _ =
+            window.set_timeout_with_callback_and_timeout_and_arguments_0(resolve.as_ref(), timeout);
     });
     let _ = JsFuture::from(promise).await;
 }
@@ -1203,7 +1210,7 @@ fn refresh_suggestions(app: &Shared) -> Result<(), JsValue> {
             // because it fires as many times as the reader clicks.
             let id = id.clone();
             spawn_local(async move {
-                show_station_by_id(&app, &id).await;
+                show_station_by_id(&app, &id);
             });
         });
         row.add_event_listener_with_callback("click", callback.as_ref().unchecked_ref())?;
@@ -1540,9 +1547,8 @@ struct FoundStop {
 /// one key that means "take the first suggestion" in a combobox. A click never
 /// comes through here, so a click is always the row the reader pressed.
 fn on_submit(app: &Shared) {
-    let row = match app.results.first_element_child() {
-        Some(row) => row,
-        None => return,
+    let Some(row) = app.results.first_element_child() else {
+        return;
     };
     // The row's own click handler does the work; dispatching a click keeps one
     // code path for choosing a station rather than two that can disagree.
@@ -1562,7 +1568,7 @@ fn on_keydown(app: &Shared) {
 }
 
 /// Show a station's board, by stop-point id.
-async fn show_station_by_id(app: &Shared, id: &str) {
+fn show_station_by_id(app: &Shared, id: &str) {
     show_station(app, id);
 }
 
@@ -1629,6 +1635,9 @@ fn updated_ago(app: &Shared) -> String {
     let Some(performance) = app.window.performance() else {
         return String::new();
     };
+    // `.max(0.0)` makes the value non-negative, and an "ago" label never
+    // needs more than a u32 of seconds.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let seconds = ((performance.now() - fetched) / 1000.0).max(0.0) as u32;
     let ago = match seconds {
         0..=9 => "just now".to_string(),
@@ -1658,6 +1667,11 @@ fn updated_ago(app: &Shared) -> String {
 /// were switched off. A mode heading is shown whenever the board has more than
 /// one mode in it; for a single-mode station it would be a label for nothing,
 /// and the existing rule of not labelling a lone platform is the same judgement.
+// One paint is one pass over the board's rows; splitting it would spread a
+// single DOM shape across several functions that only this file calls. The
+// lint's 100-line budget is a heuristic, and the function is flat — long,
+// not deep.
+#[allow(clippy::too_many_lines)]
 fn paint(app: &Shared, board: &Board) {
     let root = &app.departures;
     clear(root);
@@ -1881,21 +1895,170 @@ fn watch_connection(app: &Shared) -> Result<(), JsValue> {
 /// The release of a stale registration is likewise started rather than awaited,
 /// and deliberately survives a registration that failed: that is exactly the
 /// case where an older, wider registration may still be in the way.
-fn register_service_worker(window: &Window) -> Result<(), JsValue> {
+fn register_service_worker(window: &Window) {
     // Relative to the page, so the worker works from any mount point. The scope
     // is stated rather than inherited: see [`SCOPE`].
     let options = web_sys::RegistrationOptions::new();
     options.set_scope(SCOPE);
-    let _ = window
+    let promise = window
         .navigator()
         .service_worker()
         .register_with_options("./service-worker.js", &options);
 
     let owned: Window = window.clone();
     spawn_local(async move {
+        // The promise resolves to the registration, which is the handle the
+        // update nudge watches. Failure costs offline support and nothing
+        // else, so it is swallowed exactly as the fire-and-forget register
+        // above always was.
+        if let Ok(Ok(registered)) = JsFuture::from(promise)
+            .await
+            .map(JsCast::dyn_into::<web_sys::ServiceWorkerRegistration>)
+        {
+            nudge_worker_update(&registered).await;
+        }
         release_stale_registrations(&owned).await;
     });
-    Ok(())
+}
+
+/// Ask this app's service worker to update as soon as it can take over.
+///
+/// The worker never swaps itself in unasked: an update waits for every page
+/// it controls to close, because a board mid-visit must not run half old code
+/// under half new. Left exactly there, an installed copy would update only
+/// when every opening of it has closed — on a phone, possibly never. So this
+/// asks, and the ask is safe by construction: the sender is the page itself,
+/// which then reloads as the swap happens. The worker answers the message
+/// with `skipWaiting`, the browser fires `controllerchange`, the page reloads
+/// exactly once, and the old worker is redundant. No client ever straddles
+/// the two versions — the one that asked is the one that stepped aside.
+///
+/// The message is sent for a worker already installed and waiting, and for
+/// one still installing — sent on `installed` in the second case, after a
+/// `statechange` wait — and a `controllerchange` arriving with no reload of
+/// ours in flight is answered by one reload, so a version swap is never
+/// better than one reload away, whatever path it came in on.
+///
+/// Best effort like everything around it: a failure is a console line, and a
+/// board that stays on this version still shows departures once online.
+async fn nudge_worker_update(registration: &web_sys::ServiceWorkerRegistration) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+
+    // The reload that follows a swap. The flag keeps it one-per-swap, so a
+    // late `updatefound` from the same registration cannot reload again
+    // underneath it.
+    watch_for_controller_change(&window);
+
+    // A worker installed and waiting for pages like this one to close. This
+    // is the state an update is left in when a visit ended before its
+    // handover: nothing new will arrive until the served bytes change again,
+    // so this is the one chance to ask it in.
+    if let Some(worker) = registration.waiting() {
+        if worker.state() == web_sys::ServiceWorkerState::Installed {
+            ask_worker_in(&worker);
+            return;
+        }
+    }
+
+    // A worker installing right now — this visit's own update check found
+    // one — or one that arrives later while the page stands.
+    let installing = match registration.installing() {
+        Some(worker) => Some(worker),
+        None => update_found(registration).await,
+    };
+    let Some(worker) = installing else {
+        return;
+    };
+    if wait_for_state_change(&worker).await.is_err() {
+        let note = JsValue::from_str("london_rura: could not wait for the worker to install.");
+        web_sys::console::warn_1(&note);
+        return;
+    }
+    if worker.state() == web_sys::ServiceWorkerState::Installed {
+        ask_worker_in(&worker);
+    }
+}
+
+/// Send the message the worker answers with `skipWaiting`.
+fn ask_worker_in(worker: &web_sys::ServiceWorker) {
+    worker.post_message(&JsValue::from_str("SKIP_WAITING")).ok();
+}
+
+/// Reload once when the worker in charge changes.
+///
+/// The guard is the in-flight flag: an ask sent twice would fire the event
+/// once, and a second registration's late update could fire it again under a
+/// page already reloading. One reload per swap, and never two in a row, is
+/// what keeps this from becoming the loop the naive version of this code is:
+/// a page that reloads unasked on `installed` never lets the waiting worker
+/// activate, because a reloading page still counts as a client.
+fn watch_for_controller_change(window: &web_sys::Window) {
+    thread_local! {
+        static WATCHING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if WATCHING.with(std::cell::Cell::get) {
+        return;
+    }
+    WATCHING.with(|watching| watching.set(true));
+
+    let container = window.navigator().service_worker();
+    let handler = Closure::<dyn FnMut(JsValue)>::new(move |_event: JsValue| {
+        if let Some(window) = web_sys::window() {
+            window.location().reload().ok();
+        }
+    });
+    let _ = container
+        .add_event_listener_with_callback("controllerchange", handler.as_ref().unchecked_ref());
+    // Never dropped: exactly one listener for the page's lifetime, and the
+    // guard above makes re-registering a no-op.
+    handler.forget();
+}
+
+/// The worker this registration announces through `updatefound`, if one
+/// arrives while the page stands.
+///
+/// The event carries the registration, not the worker; the worker is its
+/// `installing` one. `None` resolves the wait empty if the registration is
+/// ever torn down between the two states this cares about.
+async fn update_found(
+    registration: &web_sys::ServiceWorkerRegistration,
+) -> Option<web_sys::ServiceWorker> {
+    let event = JsFuture::from(js_sys::Promise::new(&mut |resolve, _reject| {
+        let resolved = Closure::<dyn FnMut(JsValue)>::new(move |value: JsValue| {
+            resolve.call1(&JsValue::NULL, &value).ok();
+        });
+        let _ = registration
+            .add_event_listener_with_callback("updatefound", resolved.as_ref().unchecked_ref());
+        // Never dropped: the promise settles at most once, and the
+        // registration outlives the page anyway.
+        resolved.forget();
+    }))
+    .await
+    .ok()?;
+    let event = event.dyn_into::<web_sys::Event>().ok()?;
+    let announced = event
+        .target()?
+        .dyn_into::<web_sys::ServiceWorkerRegistration>()
+        .ok()?;
+    announced.installing()
+}
+
+/// Resolve at the worker's next state change, whichever it is.
+async fn wait_for_state_change(worker: &web_sys::ServiceWorker) -> Result<(), JsValue> {
+    JsFuture::from(js_sys::Promise::new(&mut |resolve, _reject| {
+        let resolved = Closure::<dyn FnMut(JsValue)>::new(move |value: JsValue| {
+            resolve.call1(&JsValue::NULL, &value).ok();
+        });
+        let _ = worker
+            .add_event_listener_with_callback("statechange", resolved.as_ref().unchecked_ref());
+        // Never dropped, like the one above: at most one state change is
+        // waited for here, and the worker outlives the page.
+        resolved.forget();
+    }))
+    .await
+    .map(|_| ())
 }
 
 /// Hand this app's own URLs back to the current worker.
@@ -1966,7 +2129,7 @@ async fn release_stale_registrations(window: &Window) {
                 Ok(promise) => {
                     let _ = JsFuture::from(promise).await;
                 }
-                Err(error) => warn("a stale service worker could not be released", error),
+                Err(error) => warn("a stale service worker could not be released", &error),
             }
         }
     }
@@ -1992,9 +2155,9 @@ fn script_belongs_to_app(script: &str, ours: &str) -> bool {
 /// Log a message that is not an error value: a failed request's reason is text
 /// the app assembled, not a `JsValue` the browser threw.
 fn warn_text(message: &str) {
-    warn(message, JsValue::from_str(message));
+    warn(message, &JsValue::from_str(message));
 }
 
-fn warn(context: &str, error: JsValue) {
-    web_sys::console::warn_2(&JsValue::from_str(context), &error);
+fn warn(context: &str, error: &JsValue) {
+    web_sys::console::warn_2(&JsValue::from_str(context), error);
 }
