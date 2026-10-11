@@ -732,6 +732,16 @@ arrivals from a cache. The generator is the same pinned prebuilt as the rest of
 the family, verified against the release's own checksum and against a digest
 pinned in the workflow.
 
+One shell file the worker deliberately does not answer from its cache is
+`manifest.webmanifest`. It stays in the precache list, so a broken one still
+fails the install loudly, but the fetch handler always sends it to the
+network: the manifest is what the browser reads to decide what an install
+*is*, and a cached copy would let a fresh install re-derive the app's
+identity from a manifest older than the last change to it — the exact shape
+of the bug that once gave every app in this family the same identity. Cache
+Storage also survives an uninstall/reinstall, so a stale cached manifest
+would outlive the app that wrote it.
+
 ## Known limitations
 
 - Nothing is cached but the shell, so a cold start with no connection shows an
