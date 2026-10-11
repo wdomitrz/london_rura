@@ -1,6 +1,12 @@
 // Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
 // AGPL License
 
+// "TfL" (Transport for London) is a proper noun, not camel-case code; every
+// module's documentation names it constantly because the domain is TfL's own
+// data. The doc-markdown lint cannot tell a brand from a type, so it is
+// silenced crate-wide rather than defacing the prose with backticks.
+#![allow(clippy::doc_markdown)]
+
 //! London Rura: a London Underground departures board, in Rust.
 //!
 //! The app is a browser application and only a browser application: it is a
