@@ -1,6 +1,11 @@
 // Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
 // AGPL License
 
+// "TfL" is a proper noun, not camel-case code, and these tests name it as
+// often as the crate itself does; the doc-markdown lint cannot tell a brand
+// from a type, so it is silenced here rather than defacing the prose.
+#![allow(clippy::doc_markdown)]
+
 //! Invariants of the app shell source, and of what is and is not committed.
 //!
 //! Everything here reads committed files. `dist/` is build output and is
@@ -56,8 +61,7 @@ fn tracked_files() -> Option<String> {
         .args(["rev-parse", "--git-dir"])
         .current_dir(root)
         .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|out| out.status.success());
     if !inside {
         return None;
     }
@@ -256,9 +260,58 @@ fn the_service_worker_template_has_exactly_one_placeholder() {
         worker.contains("new URL('./', self.location.href)"),
         "the worker must resolve its cache from its own location"
     );
+    // The one allowed call is behind the page's `SKIP_WAITING` message: the
+    // ask comes from the page that immediately reloads as the worker takes
+    // over, so no client ever straddles the two versions. Asserted
+    // structurally — the call must sit inside the message handler, gated on
+    // the message — so an unprompted or unconditional call cannot creep in.
+    let handler = worker
+        .split("addEventListener('message'")
+        .nth(1)
+        .expect("the worker must listen for the page's handover message");
+    let handler = &handler[..handler.find("});").expect("the message handler closes")];
     assert!(
-        !worker.contains("skipWaiting"),
-        "an update must not swap the wasm under a live tab"
+        handler.contains("event.data === 'SKIP_WAITING'") && handler.contains("skipWaiting()"),
+        "skipWaiting must be the worker's answer to the page's ask, never a call \
+         it makes on its own"
+    );
+    let outside: Vec<&str> = worker
+        .split("addEventListener('message'")
+        .next()
+        .expect("the prefix before the handler")
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .filter(|line| line.contains("skipWaiting"))
+        .collect();
+    assert!(
+        outside.is_empty(),
+        "no skipWaiting outside the message handler: an update must not swap the \
+         wasm under a live tab unasked, but found {outside:?}"
+    );
+}
+
+/// The page asks a newly installed worker in, and reloads as it takes over.
+///
+/// Without the ask, an installed copy only ever moves to a new version when
+/// every opening of it has closed — on a phone, possibly never. This pins
+/// both halves: the page's message, which the worker answers with
+/// `skipWaiting`, and the page's own reload on `controllerchange`.
+#[test]
+fn the_page_takes_an_installed_worker_over_with_a_reload() {
+    let ui = browser_layer();
+    assert!(
+        ui.contains("registration.waiting()") && ui.contains(".installing()"),
+        "the page must look at both workers an update can leave behind: one already \
+         installed and waiting, and one discovered while the page stands"
+    );
+    assert!(
+        ui.contains("post_message(&JsValue::from_str(\"SKIP_WAITING\"))"),
+        "the handover starts with the page's message; the worker never swaps \
+         itself in unasked"
+    );
+    assert!(
+        ui.contains("controllerchange") && ui.contains("location().reload()"),
+        "and ends with the page reloading exactly as the worker takes over"
     );
 }
 
@@ -511,12 +564,11 @@ fn strip_noscript(visible: &str) -> String {
     while let Some(start) = rest.find(NOSCRIPT_OPEN) {
         out.push_str(&rest[..start]);
         let after = &rest[start + NOSCRIPT_OPEN.len()..];
-        match after.find(NOSCRIPT_CLOSE) {
-            Some(end) => rest = &after[end + NOSCRIPT_CLOSE.len()..],
-            None => {
-                rest = after;
-                break;
-            }
+        if let Some(end) = after.find(NOSCRIPT_CLOSE) {
+            rest = &after[end + NOSCRIPT_CLOSE.len()..];
+        } else {
+            rest = after;
+            break;
         }
     }
     out.push_str(rest);

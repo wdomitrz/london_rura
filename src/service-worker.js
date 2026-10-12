@@ -22,6 +22,12 @@
 // wrong. The manifest is the one own-directory URL the handler never answers
 // from the cache at all — it must always be a fresh read, because it decides
 // what an install is.
+//
+// An update never swaps itself under a live page unasked: left alone it waits
+// for every page it controls to close, because a board mid-visit must not run
+// half old code under half new. The one ask that exists comes from this app's
+// own page (see `message` below), which reloads as the handover happens, so no
+// page ever straddles the two versions.
 const ROOT = new URL('./', self.location.href);
 const CACHE = 'london-rura-' + ROOT.pathname + '-__VERSION__';
 const ASSETS = ['./', 'app.js', 'app_bg.wasm', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'icon.svg', 'index.html'].map(p => new URL(p, ROOT).href);
@@ -32,6 +38,15 @@ const IS_OWN = url => url.startsWith(ROOT.href);
 const MANIFEST = new URL('manifest.webmanifest', ROOT).href;
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)));
+});
+// The page's ask. `nudge_worker_update` in `ui.rs` sends this when it has a
+// worker installed and waiting: this worker takes over at once, and the page
+// — the sender — hears the resulting `controllerchange` and reloads. A page
+// that never asks is never swapped, which keeps the guarantee above; the
+// message is the ask, and it comes from the one client that immediately
+// steps out of the way.
+self.addEventListener('message', event => {
+  if (event.data === 'SKIP_WAITING') self.skipWaiting();
 });
 self.addEventListener('activate', event => {
   event.waitUntil((async () => {
