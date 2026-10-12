@@ -123,6 +123,17 @@ check assert the API's absence from the worker, because a stray allowlist entry
 would serve arrivals from a cache that is hours old while the board claims to be
 live.
 
+**How an update lands.** The worker never swaps itself in unasked: an update
+waits for every page it controls to close, because a board mid-visit must not
+run half old code under half new. The page asks — `ui.rs`'s
+`nudge_worker_update` sends `SKIP_WAITING` to a worker that is installed and
+waiting, and to one discovered mid-visit — and the worker's `skipWaiting`
+answers **only** that message. The page then reloads once on
+`controllerchange`. Without the ask, an installed copy on a phone can wait
+days for the app to close; with it, the next open updates, and no page is ever
+swapped under without having asked. (A page that reloads unasked on
+`installed` loops forever: a reloading page still counts as a client.)
+
 **Why the scope is stated.** The board registers its worker with an explicit
 scope of `./` and then releases any registration left behind that covers this
 app's directory but is wider than it. A registration outlives the page that

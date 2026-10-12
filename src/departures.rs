@@ -169,6 +169,7 @@ impl StopDetail {
     /// An empty string when there is nothing to add — a stop with no letter, no
     /// routes and no direction adds a line that says only that the board knows
     /// nothing, which is worse than saying nothing.
+    #[must_use]
     pub fn describe(&self) -> String {
         let routes = self.routes.join(", ");
         let towards = self.towards.as_deref().unwrap_or_default().trim();
@@ -189,6 +190,7 @@ impl Station {
     /// everything on sees the Underground's board for an interchange and a reader
     /// with only buses on sees the buses. `None` when no enabled mode serves
     /// this station, which is how the picker filters it out.
+    #[must_use]
     pub fn id_for(&self, enabled: ModeSet) -> Option<&str> {
         self.ids
             .iter()
@@ -203,6 +205,7 @@ impl Station {
     }
 
     /// Whether any enabled mode serves this station.
+    #[must_use]
     pub fn serves(&self, enabled: ModeSet) -> bool {
         self.ids.iter().any(|(mode, _)| enabled.contains(*mode))
     }
@@ -278,6 +281,7 @@ pub struct Board {
 
 impl Board {
     /// True when TfL had nothing at all for this station.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.platforms.is_empty()
     }
@@ -299,6 +303,7 @@ impl Board {
     ///   would make the board silently incomplete in a way no message explains.
     /// * platforms that lose every departure are dropped, so switching a mode
     ///   off removes its tables rather than leaving empty headings behind.
+    #[must_use]
     pub fn filtered(&self, enabled: ModeSet) -> Board {
         let platforms: Vec<Platform> = self
             .platforms
@@ -315,6 +320,7 @@ impl Board {
     /// Whether filtering by `enabled` would hide anything. The board says so
     /// rather than showing an empty table, because "you have switched this off"
     /// and "there is nothing running" are different answers.
+    #[must_use]
     pub fn has_hidden_platforms(&self, enabled: ModeSet) -> bool {
         self.platforms
             .iter()
@@ -372,6 +378,7 @@ const LINE_COLOURS: &[(&str, &str)] = &[
 ///
 /// Prefer [`departure_colour`] on a board: this function alone is why every
 /// non-Underground row was grey.
+#[must_use]
 pub fn line_colour(line: &str) -> &'static str {
     LINE_COLOURS
         .iter()
@@ -437,6 +444,7 @@ pub fn departure_colour(line: &str, mode: Option<Mode>) -> &'static str {
 /// goes to; the text is the thing that survives when the colour cannot be
 /// seen, which also makes the board readable for a reader who is colour blind
 /// or on a dimmed screen.
+#[must_use]
 pub fn line_ink(colour: &str) -> &'static str {
     if contrast_ratio(colour, DARK_INK) >= contrast_ratio(colour, LIGHT_INK) {
         DARK_INK
@@ -462,6 +470,7 @@ pub const LIGHT_INK: &str = "#ffffff";
 /// The coefficients and the 0.03928 threshold are the ones WCAG defines; the
 /// linearisation is what makes the ratio below match what a reader sees rather
 /// than what the hex codes suggest.
+#[must_use]
 pub fn relative_luminance(colour: &str) -> f64 {
     let hex = colour.trim().trim_start_matches('#');
     let Some(rgb) = (0..3).map(|i| channel(hex, i)).collect::<Option<Vec<u8>>>() else {
@@ -499,6 +508,7 @@ fn linearise(value: u8) -> f64 {
 }
 
 /// The WCAG contrast ratio between two sRGB hex colours, from 1.0 to 21.0.
+#[must_use]
 pub fn contrast_ratio(a: &str, b: &str) -> f64 {
     let (one, other) = (relative_luminance(a), relative_luminance(b));
     let lighter = one.max(other);
@@ -521,6 +531,7 @@ pub fn contrast_ratio(a: &str, b: &str) -> f64 {
 /// `commonName: null` is the check that still earns its place. TfL sends it for
 /// the unnamed legs of an interchange, and those legs carry their station's own
 /// id shape, so without this the picker fills with rows that have no name.
+#[must_use]
 pub fn is_station(common_name: Option<&str>) -> bool {
     common_name.is_some_and(|name| !name.is_empty())
 }
@@ -539,6 +550,7 @@ pub fn is_station(common_name: Option<&str>) -> bool {
 /// station that looks listed and shows no trains at all. That failure mode is
 /// what this predicate exists to prevent, and it is a rule learned by measuring
 /// the endpoint rather than read off a document.
+#[must_use]
 pub fn is_requestable(id: &str) -> bool {
     id.starts_with("940GZZ") || id.starts_with("910G")
 }
@@ -547,6 +559,7 @@ pub fn is_requestable(id: &str) -> bool {
 ///
 /// A mode this app does not know is ignored rather than fatal: TfL's mode list
 /// grows, and an unknown entry should narrow nothing rather than break the list.
+#[must_use]
 pub fn modes_of(names: &[String]) -> ModeSet {
     let mut set = ModeSet::empty();
     for name in names {
@@ -605,6 +618,7 @@ pub struct StopPoint {
 /// a dozen different rows in any real list; folding them together would invent a
 /// station that does not exist, and keeping them apart is what lets a reader
 /// choose the one they are standing at.
+#[must_use]
 pub fn station_index(per_mode: Vec<(Mode, Vec<StopPoint>)>) -> Vec<Station> {
     let mut merged: Vec<Station> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -642,54 +656,51 @@ pub fn station_index(per_mode: Vec<(Mode, Vec<StopPoint>)>) -> Vec<Station> {
                 // invent a stop that does not exist.
                 _ => interchange_key(&name),
             };
-            match index.get(&key).copied() {
-                Some(at) => {
-                    let station = &mut merged[at];
-                    // A requestable id replaces a non-requestable one for the
-                    // same station, rather than sitting beside it.
-                    match station
-                        .ids
-                        .iter()
-                        .position(|(m, id)| *m == mode && requestable && !is_requestable(id))
-                    {
-                        Some(slot) => station.ids[slot] = (mode, point.id.clone()),
-                        None => {
-                            if !station.ids.iter().any(|(_, id)| *id == point.id) {
-                                station.ids.push((mode, point.id.clone()));
-                            }
+            if let Some(at) = index.get(&key).copied() {
+                let station = &mut merged[at];
+                // A requestable id replaces a non-requestable one for the
+                // same station, rather than sitting beside it.
+                match station
+                    .ids
+                    .iter()
+                    .position(|(m, id)| *m == mode && requestable && !is_requestable(id))
+                {
+                    Some(slot) => station.ids[slot] = (mode, point.id.clone()),
+                    None => {
+                        if !station.ids.iter().any(|(_, id)| *id == point.id) {
+                            station.ids.push((mode, point.id.clone()));
                         }
                     }
-                    station.modes = station.modes.union(modes);
-                    if !station.names.contains(&name) {
-                        station.names.push(name);
-                    }
-                    if station.locality.is_none() {
-                        station.locality = point.locality.clone();
-                    }
                 }
-                None => {
-                    // The row is *named* after the interchange, not after
-                    // whichever mode happened to be fetched first: once Bank's
-                    // Underground and DLR stops are one row, calling it "Bank
-                    // Underground Station" would name one half of it. The
-                    // bare place name is what a reader knows it by, and the
-                    // mode chips beside it say which halves it has. Bus, cycle
-                    // and river stops keep the street name TfL gave them.
-                    let display = match mode {
-                        Mode::Bus | Mode::Cycle | Mode::River => name.clone(),
-                        _ => place_name(&name),
-                    };
-                    merged.push(Station {
-                        ids: vec![(mode, point.id.clone())],
-                        name: display,
-                        names: vec![name],
-                        locality: point.locality.clone(),
-                        detail: None,
-                        detail_asked: false,
-                        modes,
-                    });
-                    index.insert(key, merged.len() - 1);
+                station.modes = station.modes.union(modes);
+                if !station.names.contains(&name) {
+                    station.names.push(name);
                 }
+                if station.locality.is_none() {
+                    station.locality = point.locality;
+                }
+            } else {
+                // The row is *named* after the interchange, not after
+                // whichever mode happened to be fetched first: once Bank's
+                // Underground and DLR stops are one row, calling it "Bank
+                // Underground Station" would name one half of it. The
+                // bare place name is what a reader knows it by, and the
+                // mode chips beside it say which halves it has. Bus, cycle
+                // and river stops keep the street name TfL gave them.
+                let display = match mode {
+                    Mode::Bus | Mode::Cycle | Mode::River => name.clone(),
+                    _ => place_name(&name),
+                };
+                merged.push(Station {
+                    ids: vec![(mode, point.id.clone())],
+                    name: display,
+                    names: vec![name],
+                    locality: point.locality.clone(),
+                    detail: None,
+                    detail_asked: false,
+                    modes,
+                });
+                index.insert(key, merged.len() - 1);
             }
         }
     }
@@ -752,6 +763,7 @@ pub fn place_name(name: &str) -> String {
 }
 
 /// The matching key for [`place_name`]: the same string, case-folded.
+#[must_use]
 pub fn interchange_key(name: &str) -> String {
     place_name(name).to_lowercase()
 }
@@ -785,10 +797,15 @@ const MODE_STATION_SUFFIXES: &[&str] = &[
 
 /// A mode's position in [`crate::modes::MODES`].
 fn position(mode: Mode) -> u8 {
-    crate::modes::MODES
+    // `MODES` has a handful of entries, so the position is far inside a u8;
+    // the `unwrap_or` value is the sentinel the one caller treats as "last".
+    let at = crate::modes::MODES
         .iter()
         .position(|candidate| *candidate == mode)
-        .unwrap_or(usize::MAX) as u8
+        .unwrap_or(usize::MAX);
+    #[allow(clippy::cast_possible_truncation)]
+    let index = at as u8;
+    index
 }
 
 /// How a reader types a station name, and what they get back.
@@ -811,6 +828,7 @@ pub struct Search<'a> {
 
 impl<'a> Search<'a> {
     /// A search over a station list.
+    #[must_use]
     pub fn new(stations: &'a [Station]) -> Self {
         Self { stations }
     }
@@ -819,6 +837,7 @@ impl<'a> Search<'a> {
     ///
     /// `enabled` filters as well as ranks, so a reader with only the
     /// Underground on is never offered a bus stop they cannot board.
+    #[must_use]
     pub fn query(&self, query: &str, enabled: ModeSet) -> Vec<&'a Station> {
         let needle = query.trim().to_lowercase();
         if needle.is_empty() {
@@ -955,6 +974,7 @@ fn subsequence(name: &str, needle: &str) -> bool {
 /// way to turn one of them off. Keying each platform by its mode *and* its name
 /// keeps them apart, and lets the board carry the mode out to the renderer,
 /// which puts a mode heading over each block and colours its chips.
+#[must_use]
 pub fn board(arrivals: Vec<Arrival>) -> Board {
     let mut sorted = arrivals;
     sorted.sort_by_key(|arrival| arrival.time_to_station.unwrap_or(0));
@@ -1022,6 +1042,7 @@ fn departure_of(arrival: &Arrival) -> Departure {
 /// trains counted as gone but still listed — still floors towards minus
 /// infinity, so a train already departed reads a negative minute count, exactly
 /// as the original did.
+#[must_use]
 pub fn minutes_until(arrival: &Arrival) -> i32 {
     arrival_minutes(arrival.time_to_station.unwrap_or(0))
 }
@@ -1035,6 +1056,7 @@ pub fn minutes_until(arrival: &Arrival) -> i32 {
 /// read "-1 min". `div_euclid` is floor division for a positive divisor, which
 /// is exactly `Math.floor` over the integers, and it is the one operator here
 /// that gets this right. A missing time is handled by the caller, as zero.
+#[must_use]
 pub fn arrival_minutes(time_to_station: i32) -> i32 {
     time_to_station.div_euclid(60)
 }
@@ -1046,8 +1068,15 @@ pub fn arrival_minutes(time_to_station: i32) -> i32 {
 /// before it. A name with no digits — "Unknown Platform" — sorts as 0, so it
 /// leads, and two platforms that both read 0 keep the order they arrived in,
 /// because this sort is stable.
+#[must_use]
 pub fn platform_number(name: &str) -> i32 {
-    first_number(name).unwrap_or(0) as i32
+    // Platform numbers are small; a real one is far inside an i32, and the
+    // truncation lint cannot distinguish that from a hostile value — the
+    // sort only needs a stable small ordering.
+    let raw = first_number(name).unwrap_or(0);
+    #[allow(clippy::cast_possible_truncation)]
+    let number = raw as i32;
+    number
 }
 
 /// The first run of digits in a string, read as an integer.
@@ -1173,6 +1202,7 @@ impl StopPointDetail {
     /// Routes are de-duplicated and put in the order TfL listed them: a stop
     /// served by both the 22 and the N22 twice would show the number twice,
     /// which reads as a different route rather than the same one twice.
+    #[must_use]
     pub fn into_detail(self) -> StopDetail {
         let mut routes: Vec<String> = Vec::new();
         for line in self.lines {
@@ -1812,6 +1842,9 @@ mod tests {
                     .as_str()
                     .unwrap_or_default()
                     .to_string(),
+                // TfL's countdown is a small signed seconds count; the cast
+                // is exact for any real arrival.
+                #[allow(clippy::cast_possible_truncation)]
                 time_to_station: a["timeToStation"].as_i64().map(|s| s as i32),
                 platform: a["platformName"].as_str().map(str::to_string),
                 mode: a["modeName"].as_str().and_then(Mode::from_api_name),
@@ -1922,9 +1955,12 @@ mod tests {
         );
         assert!((contrast_ratio("#FFD300", "#FFD300") - 1.0).abs() < 0.01);
         // Case-insensitive, and the short form.
-        assert_eq!(relative_luminance("#fff"), relative_luminance("#FFFFFF"));
+        assert!(
+            (relative_luminance("#fff") - relative_luminance("#FFFFFF")).abs() < 1e-9,
+            "short and long hex are the same colour"
+        );
         // Unparsable input must not produce NaN and take the chip with it.
-        assert_eq!(relative_luminance("not a colour"), 0.0);
+        assert!((relative_luminance("not a colour") - 0.0).abs() < 1e-9);
         assert!(contrast_ratio("nonsense", "#ffffff").is_finite());
     }
 
@@ -2565,7 +2601,7 @@ mod shape {
         let list: StopPointList =
             serde_json::from_str(r#"{"stopPoints":[]}"#).expect("empty parses");
         assert!(list.stop_points.is_empty());
-        let list: StopPointList = serde_json::from_str(r#"{}"#).expect("a missing key parses");
+        let list: StopPointList = serde_json::from_str("{}").expect("a missing key parses");
         assert!(list.stop_points.is_empty());
     }
 
