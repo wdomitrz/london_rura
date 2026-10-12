@@ -1,5 +1,3 @@
-// Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
-// AGPL License
 // Browser lifecycle/cache plumbing only; all London Rura logic remains Rust.
 //
 // This is the one app in the family that cannot work offline, and the whole

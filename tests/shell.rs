@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
-// AGPL License
-
 //! Invariants of the app shell source, and of what is and is not committed.
 //!
 //! Everything here reads committed files. `dist/` is build output and is
@@ -56,8 +53,7 @@ fn tracked_files() -> Option<String> {
         .args(["rev-parse", "--git-dir"])
         .current_dir(root)
         .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false);
+        .is_ok_and(|out| out.status.success());
     if !inside {
         return None;
     }
@@ -218,7 +214,7 @@ fn the_shell_is_labelled_live_and_legible_without_colour() {
 
 /// The site is mounted under an arbitrary prefix, so every URL in it is
 /// relative. One build, any subdirectory — which also means the app is not
-/// pinned to the TfL API's host from the shell's point of view.
+/// pinned to the `TfL` API's host from the shell's point of view.
 #[test]
 fn the_shell_is_mountable_anywhere() {
     let page = shell();
@@ -288,7 +284,7 @@ fn the_worker_caches_exactly_the_sites_files() {
 
 /// This is the one app in the family that cannot work offline, and the reason
 /// it still behaves is that the worker never touches the live API. Catching a
-/// cached arrivals list is not an inconvenience: TfL's feed holds a few minutes
+/// cached arrivals list is not an inconvenience: `TfL`'s feed holds a few minutes
 /// of trains, so a cached one is confidently wrong, and a board that looks live
 /// while serving yesterday's trains is the worst thing this app could do.
 ///
@@ -333,7 +329,7 @@ fn the_service_worker_does_not_cache_or_intercept_the_tfl_api() {
 /// `ui.rs` writes into the DOM.
 ///
 /// What is still allowed is a fact about the *service*. "Departures come live
-/// from the TfL API" tells the reader why a time might be stale, which is
+/// from the `TfL` API" tells the reader why a time might be stale, which is
 /// exactly the kind of thing a board should say, and names no implementation.
 #[test]
 fn no_user_visible_text_names_the_implementation() {
@@ -481,12 +477,11 @@ fn strip_noscript(visible: &str) -> String {
     while let Some(start) = rest.find(NOSCRIPT_OPEN) {
         out.push_str(&rest[..start]);
         let after = &rest[start + NOSCRIPT_OPEN.len()..];
-        match after.find(NOSCRIPT_CLOSE) {
-            Some(end) => rest = &after[end + NOSCRIPT_CLOSE.len()..],
-            None => {
-                rest = after;
-                break;
-            }
+        if let Some(end) = after.find(NOSCRIPT_CLOSE) {
+            rest = &after[end + NOSCRIPT_CLOSE.len()..];
+        } else {
+            rest = after;
+            break;
         }
     }
     out.push_str(rest);
@@ -953,7 +948,7 @@ fn browser_code() -> String {
     strip_rust_comments(&browser_layer())
 }
 
-/// A switch of mode repaints the board it already has, rather than asking TfL
+/// A switch of mode repaints the board it already has, rather than asking `TfL`
 /// for it again.
 ///
 /// This is the "the whole website refreshes just to update the timetable" fix.
@@ -1130,7 +1125,7 @@ fn a_same_named_stop_is_described_so_it_can_be_told_apart() {
 
 /// An interchange is one row, and its mode-labelled names still find it.
 ///
-/// The duplicate the reader reported: TfL names each half of a station after its
+/// The duplicate the reader reported: `TfL` names each half of a station after its
 /// mode, so the Underground, the DLR and the National Rail at one place were
 /// three rows. The merge is in `departures.rs`; what is asserted here is that
 /// the names a reader might type — including the old, mode-stamped ones — are
@@ -1172,7 +1167,7 @@ fn an_interchange_keeps_the_names_a_reader_will_type() {
 /// The line column is wide enough for the longest name any board puts in it.
 ///
 /// A clipped chip is worse than a narrow one: "Elizabeth li…" is neither a
-/// colour cue nor a name, and the Elizabeth line is the longest `lineName` TfL
+/// colour cue nor a name, and the Elizabeth line is the longest `lineName` `TfL`
 /// sends — so the column that carries every line's colour is exactly the one
 /// that cuts off the longest of them.
 ///
@@ -1328,16 +1323,16 @@ fn a_board_keeps_every_platform_of_a_single_mode_station() {
     );
 }
 
-/// A service with no destination name shows what TfL said instead of a dash.
+/// A service with no destination name shows what `TfL` said instead of a dash.
 ///
 /// At King's Cross the Hammersmith & City services arrive with an empty
 /// `destinationName` and `towards: "Check Front of Train"`. That is a working
 /// notice for the crew rather than a passenger destination, and it is the only
-/// thing TfL says about where the train is going. Rendered as a dash the row
+/// thing `TfL` says about where the train is going. Rendered as a dash the row
 /// read as missing data; rendered as itself it is the instruction a reader
 /// standing on that platform needs.
 ///
-/// `towards` is a **fallback**, not a replacement: TfL sends it on ordinary
+/// `towards` is a **fallback**, not a replacement: `TfL` sends it on ordinary
 /// services too, where it repeats the destination, and a duplicate would be
 /// worse than the name alone.
 #[test]
@@ -1370,11 +1365,11 @@ fn a_missing_destination_falls_back_to_what_tfl_actually_said() {
     );
 }
 
-/// Every request to TfL waits its turn, because the API rate-limits.
+/// Every request to `TfL` waits its turn, because the API rate-limits.
 ///
 /// **This is the fix for the wall of "Error fetching departures."** Measured on
 /// 2026-10-02: typing one eight-letter word into the search box produced 201
-/// requests, and TfL answers a burst with HTTP 429 — which the app reported with
+/// requests, and `TfL` answers a burst with HTTP 429 — which the app reported with
 /// the same words it uses for a dead network, so a reader could not tell that the
 /// app had rate-limited itself.
 #[test]
@@ -1414,7 +1409,7 @@ fn every_request_to_tfl_goes_through_the_throttle() {
 /// A rate limit is told apart from a dead network, because they are different
 /// problems and only one of them clears on its own.
 ///
-/// TfL's own body for this is "Rate limit is exceeded. Try again in 7 seconds",
+/// `TfL`'s own body for this is "Rate limit is exceeded. Try again in 7 seconds",
 /// so the reader is told a wait is what is needed, rather than being sent away
 /// to retry into the same limit.
 #[test]

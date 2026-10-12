@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
-// AGPL License
-
 //! The modes of transport the board serves, and what each one is called and
 //! coloured.
 //!
@@ -11,17 +8,17 @@
 //! every bus in London were all missing, and the mode the app *asked* for
 //! (`tube,elizabeth-line`) returned Elizabeth line stops it then threw away.
 //!
-//! TfL gives every mode a name and a colour in its own vocabulary, and this
-//! table is that vocabulary. The colours are TfL's published mode colours, used
+//! `TfL` gives every mode a name and a colour in its own vocabulary, and this
+//! table is that vocabulary. The colours are `TfL`'s published mode colours, used
 //! the way the line colours are used: as a chip, with the text colour chosen
 //! for contrast against it.
 
-/// One mode of transport, as TfL names it.
+/// One mode of transport, as `TfL` names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Mode {
     /// The Underground, including the sub-surface lines.
     Tube,
-    /// The Elizabeth line, which TfL treats as a separate mode and the app
+    /// The Elizabeth line, which `TfL` treats as a separate mode and the app
     /// previously hid.
     Elizabeth,
     /// The Overground: the national-rail services inside Greater London.
@@ -38,7 +35,7 @@ pub enum Mode {
     River,
     /// National rail: the mainline stations inside London.
     ///
-    /// **No departure data.** TfL's free API lists these stations — they come
+    /// **No departure data.** `TfL`'s free API lists these stations — they come
     /// back from `StopPoint/Search` with `"modes": ["national-rail"]` — but
     /// every one of their ids answers `/Arrivals` with an empty array. Measured
     /// at Stratford International, the station the app was asked about: the
@@ -48,7 +45,7 @@ pub enum Mode {
     /// inventing one would be worse than saying so.
     ///
     /// So the mode exists and the stations exist, and choosing one says plainly
-    /// that TfL does not publish its departures. That is a better outcome than
+    /// that `TfL` does not publish its departures. That is a better outcome than
     /// Stratford International being absent: a reader asking about it is told the
     /// truth about this service, rather than shown a picker with no entry and no
     /// explanation.
@@ -73,12 +70,13 @@ pub const MODES: &[Mode] = &[
 ];
 
 impl Mode {
-    /// The mode's identifier, exactly as it appears in TfL's `modes` array and
+    /// The mode's identifier, exactly as it appears in `TfL`'s `modes` array and
     /// in the `StopPoint/Mode/<mode>` route.
     ///
     /// These strings are load-bearing: they are what the API is asked for and
     /// what its responses are filtered by. They are not free text and must not
     /// be prettified.
+    #[must_use]
     pub fn api_name(self) -> &'static str {
         match self {
             Mode::Tube => "tube",
@@ -94,6 +92,7 @@ impl Mode {
     }
 
     /// The mode's name as a reader knows it, for the toggle and the picker.
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Mode::Tube => "Underground",
@@ -109,6 +108,7 @@ impl Mode {
     }
 
     /// A shorter form, for the dense mode chips on a platform row.
+    #[must_use]
     pub fn short_label(self) -> &'static str {
         match self {
             Mode::Tube => "Tube",
@@ -123,12 +123,13 @@ impl Mode {
         }
     }
 
-    /// TfL's published colour for the mode.
+    /// `TfL`'s published colour for the mode.
     ///
     /// These are the mode colours from the same source as the line colours,
     /// and they are used as chip fills with the same contrast rule
     /// ([`crate::departures::line_ink`]). Every one of them clears 4.5:1
     /// against black or white; `every_mode_colour_is_readable` enforces it.
+    #[must_use]
     pub fn colour(self) -> &'static str {
         match self {
             Mode::Tube => "#000000",
@@ -149,6 +150,7 @@ impl Mode {
     /// Deliberately not emoji: they render differently on every platform and
     /// a departures board that changes glyph between browsers is not a board.
     /// These are characters from the same generic families as the text.
+    #[must_use]
     pub fn glyph(self) -> &'static str {
         match self {
             Mode::Tube => "T",
@@ -165,12 +167,13 @@ impl Mode {
         }
     }
 
-    /// The mode, if a TfL `modes` array entry names it.
+    /// The mode, if a `TfL` `modes` array entry names it.
     ///
-    /// TfL sends these lowercase and sometimes with a variant, so the
+    /// `TfL` sends these lowercase and sometimes with a variant, so the
     /// comparison is case-insensitive and ignores an `dlr`/`tfl-river-bus`
     /// prefix. A mode this app does not serve is `None` rather than an error:
     /// the list of modes grows, and an unknown one should be ignored, not fatal.
+    #[must_use]
     pub fn from_api_name(name: &str) -> Option<Mode> {
         let name = name.trim().to_ascii_lowercase();
         MODES
@@ -196,12 +199,14 @@ pub struct ModeSet(u16);
 
 impl ModeSet {
     /// No modes at all.
+    #[must_use]
     pub const fn empty() -> Self {
         Self(0)
     }
 
     /// Every mode, which is what the board starts on: showing everything is
     /// the honest default, and hiding a mode is a thing the reader chooses.
+    #[must_use]
     pub fn all() -> Self {
         let mut set = Self::empty();
         for mode in MODES {
@@ -211,6 +216,7 @@ impl ModeSet {
     }
 
     /// The bits, for serialising into a URL and back.
+    #[must_use]
     pub fn bits(self) -> u16 {
         self.0
     }
@@ -222,6 +228,7 @@ impl ModeSet {
     /// before the Underground, which is useless. Cycles and the river are
     /// deliberately off: they are not departures boards, and the cable car
     /// keeps a time with nobody waiting for it.
+    #[must_use]
     pub fn default_on() -> Self {
         let mut set = Self::empty();
         for mode in [
@@ -247,11 +254,13 @@ impl ModeSet {
     }
 
     /// Whether a mode is on.
+    #[must_use]
     pub fn contains(self, mode: Mode) -> bool {
         self.0 & (1 << mode_index(mode)) != 0
     }
 
     /// The modes that are on, in [`MODES`] order.
+    #[must_use]
     pub fn active(self) -> Vec<Mode> {
         MODES
             .iter()
@@ -262,11 +271,13 @@ impl ModeSet {
 
     /// Whether nothing at all is on, which is the one state the board cannot
     /// show a station for.
+    #[must_use]
     pub fn is_empty(self) -> bool {
         self.0 == 0
     }
 
     /// Every mode in either set.
+    #[must_use]
     pub fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
@@ -274,6 +285,7 @@ impl ModeSet {
     /// Whether this set and `other` share a mode — two stations are on the same
     /// interchange when they have one mode in common, which is also how a
     /// reader finds "the next station on this line".
+    #[must_use]
     pub fn intersects(self, other: Self) -> bool {
         self.0 & other.0 != 0
     }

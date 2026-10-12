@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
-// AGPL License
-
 //! London Rura: a London Underground departures board, in Rust.
 //!
 //! The app is a browser application and only a browser application: it is a
@@ -15,7 +12,7 @@
 //! * [`departures`] is the domain — which stop points are stations, how they
 //!   sort, how arrivals group into platforms, the minutes, the line colours.
 //!   It is pure, has no `web-sys` in it, and is what the unit tests drive.
-//! * `ui` is the browser — the `fetch` to TfL, the DOM, the timer, the
+//! * `ui` is the browser — the `fetch` to `TfL`, the DOM, the timer, the
 //!   query parameter, the service-worker registration. Named as plain text, not
 //!   a doc link: the module exists only on wasm, and the rustdoc the gate builds
 //!   runs on the host.

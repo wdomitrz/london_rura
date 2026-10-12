@@ -107,143 +107,52 @@ in `dist/`; `tests/shell.rs` fails if either appears in `assets/`.
 
 ## Offline: the one app in the family that cannot be
 
-The other apps in this family are offline-capable because their data is local.
-This one is not, and pretending otherwise would be a lie: a departures board
-whose minutes are wrong is worse than a board that says it cannot reach the
-network. So the trade is explicit.
-
-**What the service worker does.** It caches the eight shell files, so with a
-connection made once over HTTPS the page loads offline, the Rust board starts,
-and it can tell you it has no connection. Its `fetch` handler is an
-allowlist — `ASSETS.includes(url)`, behind `IS_OWN(url)` — and returns early
-for everything else, so no request to `api.tfl.gov.uk` is ever answered from the
-cache, ever stored, or even inspected. There is no `fetch` fallback that would
-cache an API response as a side effect. Both the shell test and the CI site
-check assert the API's absence from the worker, because a stray allowlist entry
-would serve arrivals from a cache that is hours old while the board claims to be
-live.
-
-**Why the scope is stated.** The board registers its worker with an explicit
-scope of `./` and then releases any registration left behind that covers this
-app's directory but is wider than it. A registration outlives the page that
-created it, so a worker installed for a *different* page on the same origin
-keeps answering for this one until something unregisters it — and neither a
-reload nor a newer worker takes that back, because a worker only takes control
-where its own scope reaches. Hence the repair in `ui.rs`: unregister the
-workers that are ours by script path and wider than ours by scope, and leave
-every sibling app on the origin alone. The worker's `IS_OWN` test is the other
-half of the same rule, and it holds even if the scope is ever wrong.
-
-**Why not cache the arrivals.** TfL's arrivals feed is a few minutes deep and
-its `timeToStation` values are relative to the moment of the request. Cached,
-they are meaningless: "3 min" from an hour ago is not "3 min", it is a lie
-with a countdown. An app that stored them would need to invalidate them, and
-the honest form of that is "do not store them".
-
-**What the user sees.** The shell's `#notice` element is a `role="status"`
-region that carries the connectivity state and is rewritten on the `online` and
-`offline` events, so the board says what it is before you wonder why the
-minutes stopped moving. A failed departures request — no connection, a 500, a
-rate limit, a body that is not JSON — produces the original's own wording,
-"Error fetching departures. Please try again later.", in the departures area.
-The station list failing is a separate message, because it is a different
-failure with a different consequence: there is nothing to choose, so the picker
-stays empty and the app says why.
-
-CORS is not a problem: TfL sends permissive `Access-Control-Allow-Origin` on
-this API, so a plain cross-origin `fetch` works with no proxy. It is still
-handled as a failure, because it is one whenever the network is not there.
+A departures board whose minutes are wrong is worse than a board that says it
+cannot reach the network, so the trade is explicit: the worker caches the eight
+shell files and nothing else, and never touches `api.tfl.gov.uk`. The full why
+is in `src/service-worker.js`, and `tests/shell.rs` enforces it; the
+connectivity notice and the failure wordings live in `src/ui.rs`. CORS is not a
+problem — TfL sends `access-control-allow-origin: *` — but it is still handled
+as a failure, because it is one whenever the network is not there.
 
 ## Modes, and the Elizabeth line that was missing
 
-The board serves **eight modes**, switchable from the header: Underground,
-Elizabeth line, Overground, DLR, Buses, Cable car, Cycles, River. Each has a name,
-a colour and a glyph in `src/modes.rs`, and the mode switches are in the URL
-(`?modes=dlr,bus`), so a filtered board is a link a reader can send.
-
-**The previous version had one mode and hid three others by accident.** It
-filtered stations on the stop-point id prefixes `940GZZLU` and `940GZZCR`, which
-is a filter for *the Underground* wearing the costume of a filter for *a station*.
-It discarded the Elizabeth line (`910G…`), the Overground (`910G…`), the DLR
-(`940GZZDL…`) and the cable car — silently, with no error anywhere — while the
-app's own request asked for `tube,elizabeth-line` and threw the Elizabeth line
-stops away. Keeping it was defensible as "faithful to the original" and it was
-the wrong call: the original was one of six apps and the point of the rewrite was
-to be better than the original.
-
-Now the filter is only "has a name", the modes come from the API, and
-`a_station_is_anything_with_a_name_in_any_mode` and
-`every_mode_maps_to_a_known_api_name` pin it. The second is the one that matters:
-`Mode` is an enum, so adding a mode and forgetting to map it **compiles, runs,
-and silently narrows the list to nothing** — which is exactly how the Elizabeth
-line disappeared, by no test at all.
+The board serves eight modes, switchable from the header and carried in the URL
+(`?modes=dlr,bus`), so a filtered board is a link a reader can send. Each has a
+name, a colour and a glyph in `src/modes.rs`, whose module documentation also
+tells the story of the prefix filter that hid the Elizabeth line, the
+Overground, the DLR and the cable car — and why
+`every_mode_maps_to_a_known_api_name` is the test that keeps that from coming
+back.
 
 ### One station, one id per mode
 
-An interchange is one row holding an id per mode, merged by name. This is what
-the previous version could not do: one id per station meant picking Paddington
-showed the Underground's board and the Elizabeth line's trains were never
-requested — and requesting the Underground's id for the Elizabeth line returns
-**zero** arrivals, so the omission was invisible rather than obviously wrong.
-
-Bus stops are keyed by their own id instead of their name, because a bus stop is
-named for the street it stands on and "Oxford Circus Station" is a dozen separate
-rows; folding them together would invent a station that does not exist.
+An interchange is one row holding an id per mode, merged by name — the
+Paddington story, and why bus stops keep their own id instead, is told on
+`station_index` in `src/departures.rs`.
 
 ### Buses are reached by search, not by download
 
-`StopPoint/Mode/bus` is an **HTTP 400**. There is no bus list to fetch, and there
-are ~19,000 bus stops against 270 Underground stations — a picker of bus stops is
-not a departures board. So the buses toggle turns on *search*: type a place name
-and `StopPoint/Search/{query}` returns bus stops with live arrivals
-(`490000173RC` → 13 arrivals with real route numbers, measured). Results are
-merged into the station list, so they are searchable afterwards rather than being
-a suggestion the reader has to catch. Typing is debounced by 250 ms, so "barking"
-is one request rather than seven.
+`StopPoint/Mode/bus` is an HTTP 400 and there are ~19,000 bus stops, so the
+buses toggle turns on search instead; the measurements and the mechanics
+(merging results into the list, the 250 ms debounce) live on `SEARCH_URL` and
+`spawn_search` in `src/ui.rs`.
 
 ## Three bugs this rewrite found by looking at the page
 
 All three were invisible to the test suite, and the first two cost a real user
-their app. They are written up because the shape of them is worth recognising.
+their app; each is written up beside the code that fixed it:
 
-### 1. Clicking a suggestion chose the top one
-
-The search box was wired to `change`, and `change` fires when a search box loses
-focus — which is what happens when the reader presses a suggestion. The `change`
-handler clicked the **first** suggestion, a fraction of a second before the
-reader's own click landed. Every click on a suggestion therefore selected
-whatever was at the top of the list, and the app looked like it was ignoring the
-click.
-
-`change` is gone. `keydown` for Enter is the whole of it, because Enter is the one
-key that means "take the first suggestion" in a combobox. A click never comes
-through that path.
-
-### 2. Search found nothing at all, ever
-
-`StopPoint/Search` sends **`id`**, not the documented `stopPointId`. Deserialising
-the documented name left every match without an id, the `is_some()` filter
-dropped all of them, and search returned nothing — **with every HTTP status at
-200**. It looks exactly like a search that has no results for what you typed.
-
-This is the *same* mistake as the stop-point list (§"the stop-point list sends
-`id`"), in a different endpoint, and it survived a release. `SearchMatch` now
-lives in `departures.rs` with a host-runnable test that asserts a real response
-keeps its id and that the documented name would find nothing.
-
-### 3. Fuzzy search, and what "fuzzy" does not mean
-
-The search was prefix-and-word matching, so `ark` found nothing in `Barking` and
-`stfint` found nothing at all. It now ranks four ways, the lowest being a
-**subsequence**: the query's characters, in order, anywhere. `kngs crs` finds
-King's Cross; `brxton` finds Brixton.
-
-A subsequence is not edit distance, and the limit is worth stating: a
-**transposition** — `brikton` for `brikton` → `britkton` — does not match, because
-the characters are the right ones in the wrong order. Fixing that needs
-edit-distance scoring over ~2,700 stations on every keystroke, which is the wrong
-trade for a field that has to feel instant. Dropped letters, missing vowels and
-wrong order-of-words all work; a swapped pair does not.
+1. **Clicking a suggestion chose the top one** — `change` fires on blur, which
+   a click on a suggestion causes; it is Enter-only now. See `on_keydown` in
+   `src/ui.rs`.
+2. **Search found nothing at all, ever** — `StopPoint/Search` sends `id`, not
+   the documented `stopPointId`. See `SearchMatch` in `src/departures.rs`.
+3. **Fuzzy search, and what "fuzzy" does not mean** — ranked four ways, the
+   lowest a subsequence. See `score` in `src/departures.rs`. One stated limit:
+   a **transposition** does not match — the characters are the right ones in
+   the wrong order — because edit-distance scoring over ~2,700 stations on
+   every keystroke is the wrong trade for a field that has to feel instant.
 
 ## The TfL API, measured
 
@@ -280,11 +189,10 @@ and none extra — for 81% fewer bytes, with a maximum single response of one
 line rather than the whole network. Stations served by three lines appear three
 times and are deduplicated.
 
-**3. `StopPoint/Mode/{mode}` returns a wrapper, not an array.** It answers
-`{"$type": …, "stopPoints": [...]}`. Deserialising that as a `Vec<StopPoint>`
-fails to parse, the failure is caught, and the board reports it could not load
-any stations — **with every HTTP status at 200**. It looks exactly like being
-offline. `StopPointList` and its test exist so that cannot recur quietly.
+**3. `StopPoint/Mode/{mode}` returns a wrapper, not an array** — deserialising
+it as a `Vec<StopPoint>` fails to parse and the board reports it could not load
+any stations, with every HTTP status at 200. `StopPointList` and its test in
+`src/departures.rs` exist so that cannot recur quietly.
 
 **4. Only `940GZZ…` and `910G…` ids return arrivals.** Among 1,751 named tube
 stop points the prefixes are `9400ZZLU` (918), `4900ZZLU` (479), `940GZZLU` (270),
@@ -331,27 +239,17 @@ out of the picker: a reader asking about it now learns something true about this
 service instead of concluding it does not exist.
 
 **7. The stop-point list sends `id`, not `stopPointId`.** The older TfL Unified
-API documentation shows `stopPointId`; the live endpoint does not send it, and
-of 1,858 stop points, **zero** carry it. Deserialising that name leaves every
-id as the empty string, every id fails the prefix test, and the picker is
-permanently empty **with no error reported anywhere** — which is exactly what
-"stuck on Loading stations…" looked like. The arrivals list disagrees in the
-other direction and has no id at all. `the_wire_formats_still_parse` and
-`a_real_stop_point_response_yields_stations` now pin this against a fixture
-taken from a real response.
+API documentation shows `stopPointId`; the live endpoint does not send it. The
+full measured story, and the fixtures that pin it
+(`the_wire_formats_still_parse`, `a_real_stop_point_response_yields_stations`),
+are on `StopPoint` in `src/departures.rs`.
 
 ### Why the fix is per-line, and parse from bytes
 
-`response.json()` resolves the whole body to a live JavaScript object, and
-deserialising *that* walks the object graph property by property across the
-wasm boundary, on the UI thread. On 17 MB that is long enough to be seen: the
-page stops responding, which is indistinguishable from a network that never
-answers. The app now uses `array_buffer()` and `serde_json::from_slice`, which
-parses once in Rust and never builds the JavaScript object.
-
-Both changes are needed, and neither is sufficient alone. Bytes-only still
-parses 17 MB; per-line only still builds a JS object out of 3 MB. Together the
-largest thing the UI thread ever deserialises is one line's stop points.
+Both changes are needed and neither suffices alone — bytes-only still parses
+17 MB, per-line only still builds a JavaScript object out of 3 MB — so the
+largest thing the UI thread ever deserialises is one line's stop points. The
+full why is on `fetch_bytes` in `src/ui.rs`.
 
 ## The colour scheme, and why
 
@@ -403,100 +301,40 @@ white page.
 
 **Read this before changing anything about how the app starts.** This app
 shipped four times with a green build, a green test run, a green CI job, all
-eight files present, and a page that did nothing. The user reported it as
-"stuck on Loading stations…", which was exactly right, and the cause was not
-the one that diagnosis suggested.
-
-### Why every check passed
-
-Because **nothing was running, so nothing could fail.**
-
-The entry point was marked `#[wasm_bindgen]`. That declares an ordinary
-*export*: `wasm-bindgen` puts the symbol in the wasm binary, and the generated
-glue does **not** re-export it. The glue's entire export list is:
-
-```js
-export { initSync, __wbg_init as default }
-```
-
-The shell's loader calls `m.default()`, which is the module's **initializer** —
-it instantiates the wasm and returns. The board's `start` is nowhere in that
-list and nothing else calls it. The page therefore:
-
-- loaded `index.html`, `app.js` and `app_bg.wasm` — all HTTP 200,
-- ran the loader, successfully, with no error,
-- drew its static shell, including the "Loading stations…" notice,
-- and then sat there forever, because the app's first line never executed.
-
-There is no error to log, no failed assertion, no missing file. A build that
-cannot fail cannot be caught by a test that checks the build.
-
-### The fix
-
-```rust
-#[wasm_bindgen(start)]   // not #[wasm_bindgen]
-```
-
-That attribute marks the function as the module's **start function**, which
-`wasm-bindgen` emits into the wasm's start section and the generated glue calls
-during initialisation — `wasm.__wbindgen_start();`, visible in `dist/app.js`.
-The reference implementation, `lego_mosaic`, uses this and only this; it is
-worth reading its `browser.rs` before writing another entry point.
-
-A start function is synchronous and cannot be awaited, so it does its wiring
-and hands the real work to `spawn_local`.
-
-### What now catches it
-
-- `the_board_declares_a_start_function` in `tests/shell.rs` asserts the
-  attribute is in the source, and that the start function hands async work to
-  `spawn_local` rather than trying to run it inline.
-- `the_loader_only_asks_for_the_initializer` asserts the loader does not reach
-  for an export that does not exist.
-- The CI site check asserts `dist/app.js` contains `__wbindgen_start` — the
-  property of the *built* artefact that no source-level test can see. This is
-  the one that matters: it checks what actually ships.
-
-All three are mutation-tested.
+eight files present, and a page that did nothing: the entry point was marked
+`#[wasm_bindgen]` — an ordinary *export*, which the generated glue never
+re-exports — so nothing was running and nothing that only inspects the build
+could fail. The full autopsy is on `start` in `src/ui.rs`; the fix is
+`#[wasm_bindgen(start)]`, and what now catches it is
+`the_board_declares_a_start_function` and
+`the_loader_only_asks_for_the_initializer` in `tests/shell.rs`, plus the CI
+check that `dist/app.js` contains `__wbindgen_start` — the property of the
+*built* artefact that no source-level test can see.
 
 ### The third bug, found the same way
 
-With the app finally running, the picker held **383 options for 270 stations**,
-and Acton Town appeared three times. The per-line fetch returns a station once
-per line that serves it, and the big interchanges are on three or four lines, so
-concatenating twelve responses repeats them.
-
-`station_list` now deduplicates by id, first sighting wins. Two things are
+With the app finally running, the picker held **383 options for 270 stations**.
+The per-line fetch returns a station once per line that serves it, and
+`station_index` now deduplicates by id, first sighting wins. Two things are
 worth recording about how it got there:
 
-- **It was documented and tested, and never implemented.** `LINE_IDS` said
-  "a station on three lines appears in three responses and is deduplicated
-  here", and a test asserted no duplicates — but the assertion was over a
-  single response, which cannot contain one. So the comment and the test both
-  *looked* like coverage and covered nothing. The test now concatenates two
-  real per-line responses that genuinely share Acton Town and Alperton, so it
-  fails without the dedupe.
+- **It was documented and tested, and never implemented.** A comment said a
+  shared station "is deduplicated here" and a test asserted no duplicates — but
+  over a single response, which cannot contain one. The comment and the test
+  both *looked* like coverage and covered nothing. The test now concatenates
+  two real per-line responses that genuinely share Acton Town and Alperton, so
+  it fails without the dedupe.
 - **A unit test fed from one response can never catch this.** It is a property
   of the fetch *strategy*, not of any one payload. Reading the options out of
   the rendered page is what found it, three bugs running.
 
 ### The second bug, hiding behind the first
 
-Once the app started, it **froze the renderer**. `load_stations` spawned twelve
-fetches with `spawn_local`, then polled a shared cell until every slot was
-filled, yielding between polls with a resolved `Promise` awaited from Rust.
-
-A microtask is drained *before* the browser returns to its event loop, so
-awaiting one does not let a pending `fetch` make progress. The polling loop
-starved the very tasks it was waiting for, forever — a hard hang, again with no
-error, and again invisible to every check that only inspects the build.
-
-It is now `join_all` over boxed futures: each turn polls every future and only
-yields when none is ready, and the yield is a real macrotask
-(`setTimeout(…, 0)`), which does hand control back to the event loop. That is
-also genuinely concurrent — the naive `for f in futures { f.await }` version
-would have compiled, passed every test, and serialised twelve requests into
-twelve round trips, which is the one thing the per-line fetch exists to avoid.
+Once the app started, it **froze the renderer**: a polling loop awaited a
+resolved `Promise` between polls, and a microtask is drained before the browser
+returns to its event loop, so the fetches it waited for never progressed. It is
+now `join_all` over boxed futures with a real macrotask yield; the autopsy is
+on `join_all` and `yield_to_browser` in `src/ui.rs`.
 
 **The lesson, and it generalises to every app in this family:** a board that
 renders a static shell and then stops is indistinguishable, to every automated
@@ -572,105 +410,45 @@ Two things that page view is the only way to get:
 ## Fidelity notes
 
 Porting JavaScript to Rust changes a few things by accident rather than by
-choice. Each of these was decided deliberately and is pinned by a test:
+choice. Each of these was decided deliberately, is pinned by a test, and is
+told beside the code that embodies it:
 
-- **`Math.floor` is not `/`.** Rust's `/` truncates *toward zero*, so
-  `-30 / 60` is `0` where `Math.floor(-30 / 60)` is `-1`. TfL lists trains that
-  have already gone with a negative `timeToStation`, and the original showed
-  those as `-1`. `div_euclid(60)` is floor division and restores it. This is
-  the single most likely silent behaviour change in any numeric port.
-- **`localeCompare` is not `Ord`.** The station sort was
-  `commonName.localeCompare(...)`, which the browser implements with the
-  reader's locale — untestable and machine-dependent. It is a
-  case-insensitive comparison with a code-point tie-break here, so the order is
-  the same everywhere and the tests can pin it.
-- **A truthy lookup is not a lookup.** The original wrote
-  `lineColors[dep.lineName] || "#666"`, so a `lineName` of `""` — which TfL
-  does send — took the grey through the `||`, not through being unknown. The
-  Rust treats it as a line with no colour, which is what the original meant and
-  the same colour it drew.
-- **`Number` is not `i32`.** A platform name with an absurdly long digit run
-  would overflow a parse and wrap negative, sending the table to the wrong end
-  of the screen. The digits are read as `i64` and a value that does not fit
-  sorts as 0.
-- **A deserialised field that is not there is not an error.** `stopPointId`
-  against a payload that sends `id` deserialises to an empty string for every
-  record, silently, and the filter then drops everything. `#[serde(default)]` on
-  a field that should always be present is what turns a loud parse failure into
-  a silent empty board. The fixtures for the wire formats are now transcribed
-  from real responses, because a fixture written to match the code cannot catch
-  this.
-- **`innerHTML` is not `set_text_content`.** The original built the board as an
-  HTML string, so a destination called `<script>` would have been a script. The
-  board is built from elements, and every value that reaches the page goes
-  through `textContent`.
+- **`Math.floor` is not `/`** — `div_euclid(60)` in `src/departures.rs`. Rust's
+  `/` truncates toward zero, so a departed train would read "0 min" where the
+  original read "-1". This is the single most likely silent behaviour change in
+  any numeric port.
+- **`localeCompare` is not `Ord`** — the station sort on `station_index`.
+- **A truthy lookup is not a lookup** — `line_colour`, where a `lineName` of
+  `""` reaches the grey through being unknown, not through `||`.
+- **`Number` is not `i32`** — `first_number`, which reads platform digits as
+  `i64` so an absurd digit run sorts as nothing rather than wrapping negative.
+- **A deserialised field that is not there is not an error** —
+  `#[serde(default)]` turns a loud parse failure into a silent empty board, so
+  the wire-format fixtures are transcribed from real responses: a fixture
+  written to match the code cannot catch this.
+- **`innerHTML` is not `set_text_content`** — the board is built from elements.
 
-**Elizabeth line stations.** The original's filter is `940GZZLU` and
-`940GZZCR`, kept exactly. The Elizabeth line's own stop points are `940GZZEL`,
-so they are *not* in the board, even though the mode endpoint asks for
-`elizabeth-line` and those stops come back. The list simply holds a mode the
-prefix filter excludes — the original behaved this way too, and the Elizabeth
-line's stations are mostly reached through the `940GZZCR`/`940GZZLU` ids for the
-interchanges that carry it. Keeping the two prefixes unchanged is the
-faithful port; widening them would be a redesign.
+The original's `940GZZLU`/`940GZZCR` prefix-filter story — and what the rewrite
+now does with the Elizabeth line — is on the module documentation of
+`src/modes.rs` and on `station_index` in `src/departures.rs`.
 
 ## User-visible text never names the implementation
 
 No string a reader can see may contain "Rust", "WebAssembly", "wasm",
-"JavaScript", "bindings" or "compile" — not in the shell's rendered text, and
-not in a string `ui.rs` writes into the DOM. A reader told a failure happened
-"in Rust" has been told something they cannot act on and did not ask for; what
-they need is the app's name and what to do next. So the loader's message is
-"London Rura could not start. Reload the page or check your connection."
-
-The line is the **interface**, not the codebase. This file, `README.md` and
-every source comment may and do say "Rust" in as much detail as they like;
-`tests/shell.rs` deliberately does not read them. It reads the rendered
-markup, the literals the loader writes, and the `const … : &str` messages in
-`ui.rs`, and fails on any of them.
-
-Two things are deliberately still allowed:
-
-- **A fact about the service.** "Departures come live from the TfL API" tells
-  the reader why a time might be stale, which is exactly what a board should
-  say. It names no implementation.
-- **The `<noscript>` notice**, which is the one place "JavaScript" survives.
-  Its only reader is someone whose scripting is switched off, so "this needs
-  JavaScript to run" is the true and actionable explanation of the failure the
-  notice exists to describe: the scripting did not run. It names a browser
-  setting the reader controls, and no application implementation. The test
-  treats it as the single exception and bans the word everywhere else,
-  including in `ui.rs`.
+"JavaScript", "bindings" or "compile": a reader told a failure happened "in
+Rust" has been told something they cannot act on and did not ask for. Two
+things are deliberately allowed — a fact about the service, and the
+`<noscript>` notice, whose only reader needs the word "JavaScript" — and the
+whole enforcement, exceptions included, is specified by `tests/shell.rs`. The
+line is the **interface**, not the codebase: this file, `README.md` and every
+source comment may say "Rust" in as much detail as they like.
 
 ## Tests
 
-`src/departures.rs` carries the unit tests, inline, and they are the valuable
-half of this rewrite: the id filter and both of its halves, the alphabetical
-station order and its tie-break, the sort by `timeToStation`, the platform
-grouping and the numeric platform order, the floor-to-minutes arithmetic
-including the negative case, the ten-per-platform cut, and every line colour
-including the `#666` default. They run under plain `cargo test` with no
-browser, no network and no `web-sys`, driven by fixture data. One of them
-parses the JSON shapes TfL actually sends, because a fixture built in Rust
-cannot catch a field renamed upstream.
-
-Two tests carry real weight beyond coverage. `a_real_stop_point_response_
-yields_stations` parses a fixture cut from an actual API response and fails if
-the picker comes out empty — the check that would have caught the `stopPointId`
-bug, and it reproduces the reported symptom exactly (`left: []`). And
-`every_line_is_readable_on_its_own_chip` fails if any line's colour cannot
-reach 4.5:1 against its own ink, which makes the colour scheme a property of
-the code rather than a matter of taste.
-
-`tests/shell.rs` asserts the invariants of the committed shell and of what is
-committed: no user-visible string names the implementation (see above), the page
-loads the generated bindings and not a manual wasm ABI,
-there is exactly one `<script>`, no absolute URL and no `fetch(` in the shell,
-the ids the board looks up exist, the worker has exactly one `__VERSION__` and
-no skip-waiting call, the worker caches exactly the eight site files and does
-not name the TfL API in code, `dist/` and `target/` are ignored, no generated
-file is tracked, the install PNGs exist only in `dist/`, and the original
-JavaScript PWA is gone.
+`src/departures.rs` carries its unit tests inline, at the bottom of the file,
+driven by fixtures transcribed from real API responses; they are the valuable
+half of this rewrite. `tests/shell.rs` is the executable specification of the
+committed shell's invariants; read it.
 
 There are no browser tests, no Node and no Chromium. The board's decisions are
 pure and are covered above; everything that touches the DOM is Rust building
@@ -679,36 +457,14 @@ DOM library.
 
 ## The CI check step, and a trap in it
 
-The first run of this workflow on `master` was **red with every one of the
-eight files reported `ok`**. The build was fine; the check could not run:
-
-```python3 -c '
-    import json, sys
-    ...
-'
-```
-
-`python3 -c` hands the string to the interpreter exactly as written, so the
-indentation of a multi-line body is an `IndentationError` before a single
-statement executes. The sibling failure mode is worse: an apostrophe anywhere
-in the body terminates the shell quote, and bash never reaches Python at all.
-Both forms look correct in review and fail only on a runner.
-
-The fix is the heredoc, `python3 - <<'PY'`, with the body at the same
-indentation as the `python3` line — the YAML block scalar dedents the whole
-step, so the terminator lands in column 0.
-
-`tests/shell.rs` now asserts there is no inline `python3` flag in the workflow
-(that is always a mistake, never a style choice), that every heredoc is
-terminated, and that the seven build steps are present under their exact
-names. Exact names matter: a substring check for `Lint` is satisfied by a step
-renamed `Linting`, which is the quiet drift that leaves a job green and
-unverified. Those assertions are mutation-tested, so they are known to fail
-when the workflow is broken.
-
-To rehearse a workflow change without waiting for a runner, extract the
-`run:` scripts and execute them under `bash -euo pipefail`, which is what
-GitHub does.
+The check step is a heredoc, `python3 - <<'PY'`, never `python3 -c`: an
+indented multi-line body is an `IndentationError` before a statement runs, and
+an apostrophe anywhere in the body ends the shell quote instead. The full trap
+is written up on the step in `.github/workflows/build.yml`, and
+`tests/shell.rs` asserts it stays fixed — no inline `python3` flag, every
+heredoc terminated, the seven build steps present under their exact names. To
+rehearse a workflow change without waiting for a runner, extract the `run:`
+scripts and execute them under `bash -euo pipefail`, which is what GitHub does.
 
 ## Verification
 

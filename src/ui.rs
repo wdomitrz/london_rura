@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
-// AGPL License
-
 //! The browser: the `fetch` to TfL, the DOM, the timer, the query parameter.
 //!
 //! This is the original `app.js` with the decisions moved out to
@@ -626,18 +623,13 @@ fn set_title(app: &Shared, station: Option<&str>) {
     app.document.set_title(&title);
 }
 
-/// Fetch the station list, fill the picker, and load whatever the URL asked for.
-///
-/// One request per line, all of them genuinely in flight at once, rather than
-/// the single 17 MB request the original made. See [`LINE_IDS`] for the
-/// measurements that decided it.
 /// Fetch every mode's stop points and build the station index.
 ///
-/// One request per mode, all of them genuinely in flight at once. The `join_all`
-/// below is not a convenience: the two designs it replaced each looked right and
-/// were not — see its own comment. The requests are issued together, parsed
-/// straight from bytes, and merged by name so one interchange is one row with an
-/// id per mode.
+/// One request per mode, all of them genuinely in flight at once, rather than
+/// the single 17 MB request the original made. The `join_all` below is not a
+/// convenience: the two designs it replaced each looked right and were not —
+/// see its own comment. The requests are issued together, parsed straight from
+/// bytes, and merged by name so one interchange is one row with an id per mode.
 async fn load_stations(app: &Shared) {
     let requests: Vec<ModeRequest> = FETCHED_MODES
         .iter()

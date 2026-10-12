@@ -1,6 +1,3 @@
-// Copyright (c) 2026 Witalis Domitrz <witekdomitrz@gmail.com>
-// AGPL License
-
 //! Write the static app shell to `dist/` while the crate compiles.
 //!
 //! The board is a browser application, so publishing it is a file copy and a
@@ -65,20 +62,14 @@ fn main() {
     // written into `dist/` by the `wasm-bindgen` step, and this script must not
     // delete them — they are the board itself.
     let mut built: Vec<(String, Vec<u8>)> = Vec::new();
-    built.push((
-        "index.html".to_string(),
-        read(&root, "src/ui.html").expect("the static shell"),
-    ));
+    built.push(("index.html".to_string(), read(&root, "src/ui.html")));
     // The committed SVG ships as well as rasterizes: the shell links it
     // directly as the page icon, so a site that published only the PNGs would
     // have lost its own icon's origin.
-    built.push((
-        "icon.svg".to_string(),
-        read(&root, "assets/icon.svg").expect("the icon SVG"),
-    ));
+    built.push(("icon.svg".to_string(), read(&root, "assets/icon.svg")));
     // Both PNGs come from the one committed SVG. They are build output: they
     // live only in `dist/` and are never committed.
-    let icon = read(&root, "assets/icon.svg").expect("the icon SVG");
+    let icon = read(&root, "assets/icon.svg");
     for size in ICON_SIZES {
         built.push((format!("icon-{size}.png"), rasterize(&icon, *size)));
     }
@@ -87,7 +78,7 @@ fn main() {
     // `built` so it is hashed exactly once, in template form. A change to the
     // caching logic must invalidate the cache: clients holding the old worker
     // would otherwise keep running stale logic against new assets.
-    let template = read(&root, "src/service-worker.js").expect("the worker template");
+    let template = read(&root, "src/service-worker.js");
     let version = cache_version(&built, &template);
 
     // The manifest is assembled, not copied, so its icon list is exactly the
@@ -105,10 +96,10 @@ fn main() {
     write_tree(&root.join("dist"), &built);
 }
 
-/// Read a committed source file, or `None` with a note.
-fn read(root: &Path, name: &str) -> Option<Vec<u8>> {
+/// Read a committed source file, or panic with a note.
+fn read(root: &Path, name: &str) -> Vec<u8> {
     match std::fs::read(root.join(name)) {
-        Ok(bytes) => Some(bytes),
+        Ok(bytes) => bytes,
         Err(error) => panic!("reading {name}: {error}"),
     }
 }
@@ -129,11 +120,15 @@ fn rasterize(svg: &[u8], size: u32) -> Vec<u8> {
     // 116x94mm and stretching it to a square would shear the wordmark.
     // `usvg`'s `Size` is already f32, which is what `resvg`'s `Transform` wants.
     let natural = tree.size();
-    let scale = (size as f32 / natural.width()).min(size as f32 / natural.height());
+    // Exact by construction: the only sizes come from `ICON_SIZES` (192 and
+    // 512), both exactly representable in an `f32`.
+    #[allow(clippy::cast_precision_loss, reason = "ICON_SIZES are exact in f32")]
+    let size = size as f32;
+    let scale = (size / natural.width()).min(size / natural.height());
     let drawn = natural.width() * scale;
     let drawn_y = natural.height() * scale;
     let mut transform = tiny_skia::Transform::from_scale(scale, scale);
-    transform = transform.pre_translate((size as f32 - drawn) / 2.0, (size as f32 - drawn_y) / 2.0);
+    transform = transform.pre_translate((size - drawn) / 2.0, (size - drawn_y) / 2.0);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
     pixmap.encode_png().expect("encoding the install PNG")
 }
