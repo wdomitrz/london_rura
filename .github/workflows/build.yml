@@ -264,6 +264,11 @@ jobs:
           # icon from somewhere else, and a cache entry that is not the source
           # of the rest. This is the one repo in the family that had to create
           # its icon rather than preserve one, so its bytes are pinned here.
+          #
+          # The pin moved on 2026-10-23: the roundel was a full-bleed drawing,
+          # and a launcher crops a maskable icon to the middle 80%, so it was
+          # being cropped to a circle and lost the ends of the word. The drawing
+          # is the same, wrapped in one scale transform at 72% of the canvas.
           python3 - <<'PY'
           import hashlib
           with open("assets/icon.svg", "rb") as handle:
@@ -272,7 +277,7 @@ jobs:
               published = handle.read()
           assert published == source, "dist/icon.svg is not the committed icon"
           assert hashlib.sha256(source).hexdigest() == (
-              "556cda36a81f7a1176782a740596e169fec8bd7f6ab8a17985a1d6cc0dfa36bb"
+              "2d9137f8a9a2b8acdbf4317c48054f250e4df277510fb5c0b4179e7a4333e8d1"
           ), "assets/icon.svg is no longer the credited roundel from Wikimedia"
           print("  ok   dist/icon.svg is the committed, credited roundel")
           PY
