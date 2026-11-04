@@ -22,7 +22,9 @@ Two builds, because there are two targets. Nothing generated is committed.
 ```
 # 1. the site: compile the crate to wasm and run the bindings generator
 rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.128 --locked
+# the generator must be the version Cargo.lock records
+cargo install wasm-bindgen-cli --locked \
+  --version "$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;}' Cargo.lock)"
 cargo build --locked --lib --target wasm32-unknown-unknown --release
 wasm-bindgen --target web --no-typescript --out-dir dist --out-name app \
   target/wasm32-unknown-unknown/release/london_rura.wasm
@@ -46,10 +48,13 @@ There is **no run step and no server**: the build is the whole story.
 
 `wasm-bindgen` installs to `~/.cargo/bin`, which is on `PATH` in a normal login
 shell; in a bare or non-login shell call it by absolute path
-(`~/.cargo/bin/wasm-bindgen`). The version is pinned to `=0.2.128` in
-`Cargo.toml` and must match the CLI exactly; a mismatched generator emits
-bindings the runtime will not load, and the page then fails to start with
-"London Rura could not start". No npm/JS build tool is needed. A tiny
+(`~/.cargo/bin/wasm-bindgen`). `Cargo.toml` asks for `wasm-bindgen = "0.2"` and
+`Cargo.lock` records the one version that means, because `wasm-bindgen-futures`,
+`js-sys` and `web-sys` each depend on an exact `wasm-bindgen`. The CLI must be
+that version — a mismatched generator emits bindings the runtime will not load,
+and the page then fails to start with "London Rura could not start". Both
+workflows read the version from `Cargo.lock` instead of naming it, so there is
+nothing to keep in step. No npm/JS build tool is needed. A tiny
 dynamic-import loader in `ui.html` plus the service-worker cache/lifecycle
 shell and the generated wasm-bindgen bindings are the only JavaScript in the
 app; there is no handwritten JavaScript application and no raw-pointer ABI.
@@ -739,9 +744,9 @@ kept the original name and colours — and, the check that is this app's alone,
 that the service worker does not mention the TfL API in code. That check is
 aimed at the one failure this app could have and the others cannot: a worker
 that grew an allowlist entry for the API and quietly started serving
-arrivals from a cache. The generator is the same pinned prebuilt as the rest of
-the family, verified against the release's own checksum and against a digest
-pinned in the workflow.
+arrivals from a cache. The generator is the same prebuilt binary as the rest of
+the family, at the version `Cargo.lock` records, verified against the release's
+own checksum and against a digest pinned in the workflow.
 
 One shell file the worker deliberately does not answer from its cache is
 `manifest.webmanifest`. It stays in the precache list, so a broken one still

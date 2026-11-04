@@ -50,19 +50,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # Must equal the `wasm-bindgen = "=0.2.128"` pin in Cargo.toml. A mismatched
-  # generator emits bindings the runtime will not load, and the page then fails
-  # to start with a loader-failure message -- a failure that looks like an app
-  # bug and is not one. `tests/shell.rs` asserts the two are equal rather than
-  # trusting them to be edited together.
-  #
-  # Declared in the workflow's own `env:` and read back as a shell variable,
-  # not inlined: an undeclared variable expands to nothing, the generator step
-  # installs nothing, and every other check still passes.
-  WASM_BINDGEN_VERSION: 0.2.128
   # Deliberately no RUSTFLAGS here. Sibling apps in this family need
   # `--cfg=web_sys_unstable_apis` for the Screen Wake Lock API, which is behind
-  # that cfg in web-sys 0.3.105 rather than merely feature-gated -- and a
+  # that cfg in web-sys 0.3 rather than merely feature-gated -- and a
   # `build.rs` cfg does not reach a registry dependency. This board does not
   # use a wake lock: verified on a clean build, `cargo build --locked --lib
   # --target wasm32-unknown-unknown --release` succeeds with RUSTFLAGS unset
@@ -101,12 +91,12 @@ jobs:
       - name: Install the pinned wasm-bindgen generator
         run: |
           set -euuo pipefail
-          # The official prebuilt binary, not `cargo install`. The CLI is pinned
-          # to one exact version, and `cargo install` would compile it from
-          # source -- minutes, and a second toolchain's worth of failure surface.
-          # The release publishes a musl static binary plus a `.sha256sum` per
-          # platform, so verify against that file and fail loudly rather than
-          # generating bindings from an unverified download.
+          # The official prebuilt binary, not `cargo install`. The CLI has to be
+          # the one exact version Cargo.lock records, and `cargo install` would
+          # compile it from source -- minutes, and a second toolchain's worth of
+          # failure surface. The release publishes a musl static binary plus a
+          # `.sha256sum` per platform, so verify against that file and fail
+          # loudly rather than generating bindings from an unverified download.
           #
           # The digest is checked against the release's own checksum file, and
           # then compared to the one recorded in the repository. Both, because
@@ -114,11 +104,22 @@ jobs:
           # download, the second catches a legitimately re-uploaded release --
           # which is the one an attacker would want, since only they can
           # re-upload it.
-          version="$WASM_BINDGEN_VERSION"
+          # The generator version is the one this crate is actually built
+          # against: read it from Cargo.lock instead of keeping a second copy
+          # here. Two copies drift, and the drift is silent -- a generator from
+          # another version emits bindings the runtime will not load, and the
+          # only symptom is a live site that fails to start with a loader-failure
+          # message. Reading the lock also means a moved version cannot go on
+          # using the previous version's digest below unnoticed.
+          version="$(awk '/^name = "wasm-bindgen"$/{found=1; next} \
+                          found && /^version = "/{gsub(/"/,"",$3); print $3; exit}' \
+                     Cargo.lock)"
+          test -n "$version" \
+            || { echo "::error::Cargo.lock records no wasm-bindgen version"; exit 1; }
           target=x86_64-unknown-linux-musl
           asset="wasm-bindgen-${version}-${target}.tar.gz"
           base="https://github.com/rustwasm/wasm-bindgen/releases/download/${version}"
-          pinned=b51f0208fdff83515a787bd8ab9ac5865ed84dabb66d0c709957bb59793c645f
+          pinned=9687f3bb551b9f66f37ed32a40d7913a00f7962db653054e56857bc306c3227f
 
           curl --fail --location --silent --show-error --retry 3 \
             --output "/tmp/${asset}" "${base}/${asset}"

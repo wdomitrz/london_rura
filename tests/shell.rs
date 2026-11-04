@@ -1603,72 +1603,56 @@ fn strip_yaml_comments(source: &str) -> String {
         .join("\n")
 }
 
-/// The Pages deployment cannot drift from the crate it publishes.
+/// The generator version must be the lockfile's, and nothing may restate it.
 ///
-/// The deploy job installs its own `wasm-bindgen`, pinned to a literal in the
-/// YAML, and `Cargo.toml` pins the same version the crate compiles against.
-/// Move the dependency and the workflow keeps building happily: it generates
-/// bindings for a runtime the page does not have, and the only symptom is a
-/// live site that fails at startup with "London Rura could not start" — for
-/// every visitor, and only in the browser. So the two are asserted equal here
-/// rather than trusted to be edited together.
+/// `Cargo.toml` asks for `wasm-bindgen = "0.2"`; the exact version is decided by
+/// `Cargo.lock`, and it is written down in exactly one place because
+/// `wasm-bindgen-futures`, `js-sys` and `web-sys` each depend on one exact
+/// `wasm-bindgen`. The generator has to be that same version: a mismatched one
+/// emits bindings the runtime will not load, and the only symptom is a live site
+/// that fails at startup with "London Rura could not start" — for every visitor,
+/// and only in the browser.
+///
+/// So neither workflow may name a version. A literal there is a second copy of a
+/// fact the lock records, wrong from the next `cargo update` onward, and silent
+/// when it is. Read from the lock and there is nothing to keep in step — and an
+/// install step whose `version=` derived from nothing would install no generator
+/// at all, which is why the derivation itself is asserted rather than its use.
 #[test]
-fn the_pages_build_generates_bindings_for_the_pinned_runtime() {
-    let Some(pages) = workflow("pages.yml") else {
-        return;
-    };
-    let manifest =
-        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
-            .expect("Cargo.toml");
-
-    // Read the pin as Cargo writes it: `wasm-bindgen = "=0.2.128"`, an exact
-    // requirement. A looser form ("0.2.128", "^0.2") would resolve to whatever
-    // is newest in the lockfile, and the workflow's literal would then be
-    // naming one arbitrary version of several.
-    let expected = manifest
-        .lines()
-        .find_map(|line| {
-            let rest = line.trim().strip_prefix("wasm-bindgen")?;
-            let rest = rest.trim_start().strip_prefix('=')?;
-            Some(rest.trim().trim_matches('"').to_owned())
-        })
-        .unwrap_or_else(|| panic!("Cargo.toml pins no exact wasm-bindgen version"));
-    let version = expected.trim_start_matches('=').trim_matches('"');
-
-    // The version has to reach the job that generates the bindings, as the
-    // `version=` it installs — not merely somewhere in the file, where a
-    // mention in a comment would satisfy this and the job would still install
-    // whatever else it found.
-    let literal = format!("version=\"{version}\"");
-    let indirect = "version=\"$WASM_BINDGEN_VERSION\"";
+fn both_workflows_take_the_generator_version_from_the_lockfile() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml");
     assert!(
-        pages.contains(&literal) || pages.contains(indirect),
-        "pages.yml must install wasm-bindgen {version} (`{literal}` or `{indirect}`); it cannot \
-         drift from the Cargo.toml pin, or the site fails to start in the browser and nowhere else",
+        manifest
+            .lines()
+            .any(|line| line.trim() == "wasm-bindgen = \"0.2\""),
+        "Cargo.toml must ask for `wasm-bindgen = \"0.2\"`; an exact pin here would be a second \
+         copy of the version the lockfile and the sibling crates already decide",
     );
 
-    // A version passed through `env:` is only a single source of truth if the
-    // variable is actually declared, at the same literal value, in a real
-    // `env:` block. An undeclared variable expands to nothing: the generator
-    // step installs no generator, every other check passes, and the job then
-    // fails at the bindings step. That is silent at the point of the mistake —
-    // an undeclared and a declared variable are indistinguishable in the YAML
-    // that reads them.
-    if pages.contains(indirect) {
-        // Read the block's own text, not the file: `environment:` is not `env:`,
-        // but a comment that *says* `env:` would satisfy a bare substring
-        // check -- and this file explains its own decision two lines above it.
-        let live = strip_yaml_comments(&pages);
+    // Both workflows, because both install their own generator: a version that
+    // drifted in `build.yml` alone would leave the pull request green and only
+    // the publishing job broken.
+    for name in ["build.yml", "pages.yml"] {
+        let Some(text) = workflow(name) else {
+            continue;
+        };
+        let live = strip_yaml_comments(&text);
         assert!(
-            live.lines().any(|line| line.trim_end() == "env:"),
-            "pages.yml reads $WASM_BINDGEN_VERSION but declares no top-level `env:` block, so \
-             the variable expands to nothing and the generator step installs nothing",
+            live.contains("version=\"$(awk"),
+            "{name} must derive the generator version from Cargo.lock rather than naming one",
         );
-        let declared = format!("WASM_BINDGEN_VERSION: {version}");
         assert!(
-            pages.contains(&declared),
-            "pages.yml installs $WASM_BINDGEN_VERSION but never declares it as {version}; an \
-             undeclared variable expands to nothing and the generator step installs nothing",
+            live.contains("Cargo.lock"),
+            "{name} must read Cargo.lock for the generator version",
+        );
+        assert!(
+            !live.contains("WASM_BINDGEN_VERSION"),
+            "{name} must not declare a generator version of its own; Cargo.lock has it",
+        );
+        assert!(
+            !live.contains("version=\"0.2"),
+            "{name} must not name a generator version literal",
         );
     }
 }
